@@ -27,7 +27,7 @@ Status: **0.9.1** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd6
 
 - A **Kubernetes-compatible** distribution: `h3s server` / `h3s agent`, SQLite by default, stock `kubectl` and Helm against a focused API surface.
 - Control plane and kubelet path are **native Rust** (no embedded Go Kubernetes).
-- **Complement posture:** run h3s as its own small cluster **or** as an **agentic node / pool inside a larger Kubernetes cluster** (EKS/GKE/…). Same product; different seat.
+- **Complement posture:** run h3s as an **agentic node / pool inside a larger Kubernetes cluster** (EKS/GKE/…) **or** as its own small cluster for lab and CI. Same product; different seat.
 
 ## What this is not
 
@@ -39,7 +39,17 @@ Status: **0.9.1** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd6
 
 1. Keep the managed control plane and existing workloads.
 2. Add an **h3s agentic node** (Virtual Kubelet–style custom node) **or** a light **RuntimeClass / dedicated pool** — operators and AgentFleet CRDs as the richer path when ready.
-3. Schedule agent workloads onto that plane with ordinary `kubectl`. Platform services (API recipe store, durable run history) live as normal cluster services — not one PVC glued to every agent pod.
+3. Schedule agent workloads onto that plane with ordinary `kubectl`. Shared platform services (API recipe store, durable run history) live as normal cluster services — not one PVC glued to every agent pod.
+
+### Deployment patterns
+
+| Pattern | Role | When |
+| --- | --- | --- |
+| **A — agentic node** | h3s registers as a Node; stock scheduler places Pods with selectors/affinity | **Primary** — join the cluster you already run |
+| **C — RuntimeClass / pool** | Label/taint a node pool; `restricted-v1` agents on stock runtime | **Day-0 on-ramp** before a custom node joins |
+| **B — operator + CRDs** | AgentFleet-style lifecycle above raw Pods | **Grow-up** when workloads need richer control |
+| **Nested h3s** | Team sandbox API inside the stock cluster | **Middle** option — explicit advanced chapter |
+| **Federation** | Multi-cluster views | **Enterprise only** — not the default README path |
 
 ## Relationship to k3s
 
@@ -107,10 +117,10 @@ kubectl apply -f examples/supported-pod.yaml
 
 ## Platform services (Facet + HedronDB)
 
-Deploy these as **shared cluster services** — not per-agent disks:
+Deploy as **shared cluster services** — not per-agent PVCs:
 
-- **[Facet](https://github.com/VirtualMachinist/facet)** — API recipe client and durable run history (Lattice).
-- **[HedronDB](https://github.com/VirtualMachinist/hedrondb)** — durable desired/observed intent store with HQL.
+- **[Facet](https://github.com/VirtualMachinist/facet)** — API recipe / run-history client (Lattice).
+- **[HedronDB](https://github.com/VirtualMachinist/hedrondb)** — durable intent store with HQL.
 
 Agents reach them via normal Services and workload identity; platform durability does not require mounting a store PVC into every agent Pod.
 
