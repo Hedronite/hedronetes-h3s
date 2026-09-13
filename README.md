@@ -17,7 +17,7 @@
 
 h3s complements **Kubernetes and k3s**. It is not a migration off your cluster.
 
-Teams on EKS, GKE, AKS, or any stock kube API keep their control plane. They join an **h3s node** (or a small operator-managed pool) so agent workloads get a tight, Rust-native runtime with stock `kubectl` — without rewriting the cluster.
+Teams on EKS, GKE, AKS, or any stock kube API keep their control plane. They join an **h3s node** (or a small operator-managed pool) so agents get a tight, Rust-native runtime with stock `kubectl` — without rewriting the cluster.
 
 > Kubernetes-compatible. Rust-native. Built to sit **beside** your existing control plane — including k3s — not to replace it.
 
@@ -146,7 +146,7 @@ cargo run -p h3s -- agent --help
 
 ## Status
 
-**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). This product works; further stress testing is needed before a production recommendation. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
+**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). This product works; further stress testing is needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
 
 A multi-node h3s cluster — native `server` + separate `agent` — runs workloads with stock `kubectl` and Helm. Proven on Colima VMs running NixOS, Debian, and Fedora.
 
