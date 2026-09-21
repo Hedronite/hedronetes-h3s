@@ -1,5 +1,8 @@
 # Hedronetes (h3s)
 
+> **Status:** In production use as daily-driver / dogfood agentic node beside K8s/k3s (v0.9.1). Hardening: further stress testing before broad production recommend; durable HA + conformance targeted for v1.0.0. Not a toy reference.
+
+
 <p align="center">
   <img src="assets/hedronetes-seal-dark.jpeg" alt="Hedronetes (h3s) product mark" width="220" />
 </p>
