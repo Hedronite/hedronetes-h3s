@@ -91,7 +91,7 @@ Stock `kubectl` and Helm work against these kinds only (Kubernetes **v1.34** wir
 | rbac.authorization.k8s.io | v1 | ClusterRole | cluster |
 | rbac.authorization.k8s.io | v1 | ClusterRoleBinding | cluster |
 
-StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are not implemented.
+StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are in development.
 
 ## Supported workloads
 
@@ -114,9 +114,9 @@ kubectl apply -f examples/supported-pod.yaml
 | Type | Admitted | Dataplane |
 | --- | --- | --- |
 | ClusterIP | yes | IPv4 TCP/UDP nftables proxy |
-| Headless (`clusterIP: None`) | yes | no virtual IP |
+| Headless (`clusterIP: None`) | yes | no virtual IP (in development) |
 | ExternalName | yes | no dataplane rules |
-| NodePort / LoadBalancer | no | — |
+| NodePort / LoadBalancer | in developent | — |
 
 ## Platform services (Facet + HedronDB)
 
@@ -140,12 +140,12 @@ cargo run -p h3s -- server --help
 cargo run -p h3s -- agent --help
 ```
 
-## Non-goals
+## In Development
 
-- Full Kubernetes conformance and durable HA multi-control-plane (see [Status](#status)).
-- StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy in core until explicitly scoped.
-- Replacing customer Ingress, mesh, or GitOps.
-- Federation as a default install path.
+- Full Kubernetes conformance and durable high availability multi-control-plane (see [Status](#status)).
+- StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy in core binary.
+- Ingress, mesh, and GitOps.
+- Seamless Kubernetes integration.
 
 ## Status
 
