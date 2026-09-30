@@ -35,10 +35,13 @@ struct Backend {
 #[derive(Debug)]
 struct Frontend {
     id: String,
+    /// The published address for a ClusterIP frontend; a node frontend matches
+    /// every local address instead, exactly as kube-proxy does.
     ip: Ipv4Addr,
     port: u16,
     protocol: Protocol,
     local: bool,
+    node_port: bool,
     backends: BTreeSet<Backend>,
 }
 #[derive(Debug)]
@@ -257,6 +260,7 @@ pub fn plan(
                 port: service_port,
                 protocol: protocol.clone(),
                 local,
+                node_port: false,
                 backends: backends.clone(),
             });
             // A NodePort Service adds one frontend on this node's own address
@@ -286,6 +290,7 @@ pub fn plan(
                     port: node_port,
                     protocol,
                     local: false,
+                    node_port: true,
                     backends,
                 });
             }
@@ -299,6 +304,17 @@ pub fn plan(
         pod_cidrs,
         services: frontends,
     })
+}
+impl Frontend {
+    /// `fib daddr type local` is kube-proxy's node-port match: the rule fires
+    /// for traffic to any address this node owns, not only the reported one.
+    fn match_on(&self) -> String {
+        if self.node_port {
+            "fib daddr type local".to_owned()
+        } else {
+            format!("ip daddr {}", self.ip)
+        }
+    }
 }
 impl Plan {
     pub fn render(&self, owner: &str) -> Result<String> {
@@ -314,8 +330,8 @@ impl Plan {
             if !s.backends.is_empty() {
                 writeln!(
                     out,
-                    "  ip daddr {} {} dport {} counter jump {}",
-                    s.ip,
+                    "  {} {} dport {} counter jump {}",
+                    s.match_on(),
                     s.protocol.nft(),
                     s.port,
                     s.id
@@ -334,8 +350,8 @@ impl Plan {
                 if s.backends.is_empty() {
                     writeln!(
                         out,
-                        "  ip daddr {} {} dport {} counter {}",
-                        s.ip,
+                        "  {} {} dport {} counter {}",
+                        s.match_on(),
                         s.protocol.nft(),
                         s.port,
                         if s.local { "drop" } else { "reject" }
@@ -362,9 +378,13 @@ impl Plan {
             if s.backends.is_empty() {
                 continue;
             }
+            let address = if s.node_port {
+                String::new()
+            } else {
+                format!(" ip daddr {}", s.ip)
+            };
             let original = format!(
-                "ct status dnat ct original ip daddr {} meta l4proto {} ct original proto-dst {}",
-                s.ip,
+                "ct status dnat ct original{address} meta l4proto {} ct original proto-dst {}",
                 s.protocol.nft(),
                 s.port
             );
@@ -374,6 +394,11 @@ impl Plan {
             )
             .unwrap();
             for b in &s.backends {
+                // A node frontend is only reachable from off-node clients and
+                // from local Pods, which the rule above already covers.
+                if s.node_port {
+                    continue;
+                }
                 writeln!(
                     out,
                     "  {original} ip saddr {} ip daddr {} {} dport {} counter masquerade",
@@ -576,11 +601,13 @@ mod tests {
         assert_eq!(p.services.len(), 2);
         let rules = p.render(&"a".repeat(64)).unwrap();
         assert!(rules.contains("ip daddr 10.43.0.11 tcp dport 80 counter jump svc_"));
-        assert!(rules.contains("ip daddr 192.168.104.3 tcp dport 30080 counter jump svc_"));
+        // The node port answers on every address of the node, as kube-proxy's
+        // `--dst-type LOCAL` does, not only on the reported InternalIP.
+        assert!(rules.contains("fib daddr type local tcp dport 30080 counter jump svc_"));
+        assert!(!rules.contains("ip daddr 192.168.104.3 tcp dport 30080"));
         assert!(rules.contains("dnat to 10.42.0.2:8080"));
-        assert!(rules.contains(
-            "ct original ip daddr 192.168.104.3 meta l4proto tcp ct original proto-dst 30080"
-        ));
+        assert!(rules
+            .contains("ct status dnat ct original meta l4proto tcp ct original proto-dst 30080"));
         // No reported InternalIP means no node frontend can be programmed.
         assert!(
             plan(&[node_port_service()], &[slice.clone()], &nodes(), "server").is_err(),

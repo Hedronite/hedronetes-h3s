@@ -20,6 +20,19 @@ async fn request(s: &Server, method: &str, path: &str, value: Value) -> Value {
 async fn service(s: &Server) -> Value {
     request(s,"POST",SERVICES,json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web"},"spec":{"selector":{"app":"web"},"ports":[{"name":"http","port":80,"targetPort":"http"}]}})).await
 }
+/// A Ready Pod with caller-chosen labels and a named container port.
+async fn labelled_pod(s: &Server, name: &str, labels: Value, port: (&str, u16), ip: &str) -> Value {
+    let (port_name, port_number) = port;
+    let mut p = request(
+        s,
+        "POST",
+        PODS,
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"labels":labels},"spec":{"nodeName":"worker","automountServiceAccountToken":false,"enableServiceLinks":false,"dnsPolicy":"Default","securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"web","image":"example.invalid/web:v1","ports":[{"name":port_name,"containerPort":port_number}],"securityContext":{"runAsUser":65534,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}),
+    )
+    .await;
+    p["status"] = json!({"phase":"Running","podIP":ip,"podIPs":[{"ip":ip}],"conditions":[{"type":"Ready","status":"True"}]});
+    request(s, "PUT", &format!("{PODS}/{name}/status"), p).await
+}
 async fn pod(s: &Server, name: &str, ip: &str, port: u16, ready: bool) -> Value {
     let mut p=request(s,"POST",PODS,json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"labels":{"app":"web"}},"spec":{"nodeName":"worker","automountServiceAccountToken":false,"enableServiceLinks":false,"dnsPolicy":"Default","securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"web","image":"example.invalid/web:v1","ports":[{"name":"http","containerPort":port}],"securityContext":{"runAsUser":65534,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}})).await;
     p["status"] = json!({"phase":"Running","podIP":ip,"podIPs":[{"ip":ip}],"conditions":[{"type":"Ready","status":if ready {"True"} else {"False"}}]});
@@ -187,4 +200,98 @@ async fn endpoint_controller_identity_cannot_mutate_inputs_or_read_secrets() {
     request(&s, "PUT", &format!("{SERVICES}/web"), svc).await;
     tick(&c).await;
     assert!(managed(&s).await.is_empty());
+}
+/// KP-21 live reproduction: the NodePort Service QA applied against the Ready
+/// CoreDNS Pod produced no EndpointSlice at all.
+/// The live path: the running controller watches Services, rather than being
+/// called once by hand.
+#[tokio::test]
+async fn running_controller_publishes_a_slice_for_a_new_node_port_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    let client = client(&s).await;
+    let running = tokio::spawn(h3s_controllers::run_endpoint_controller(client));
+    request(
+        &s,
+        "POST",
+        SERVICES,
+        json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"kp21-live"},"spec":{
+            "type":"NodePort",
+            "selector":{"hedronetes.io/component":"coredns-m1"},
+            "ports":[{"name":"ready","port":8181,"targetPort":"ready","nodePort":30081}]}}),
+    )
+    .await;
+    labelled_pod(
+        &s,
+        "coredns-m1",
+        json!({"hedronetes.io/component":"coredns-m1"}),
+        ("ready", 8181),
+        "10.42.0.9",
+    )
+    .await;
+    let published = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let found = managed(&s).await;
+            if !found.is_empty() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    running.abort();
+    assert!(
+        published.is_ok(),
+        "the running endpoint controller never published a slice for the NodePort Service"
+    );
+}
+
+#[tokio::test]
+async fn node_port_service_publishes_the_slice_it_dnat_needs() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    let client = client(&s).await;
+    let service = request(
+        &s,
+        "POST",
+        SERVICES,
+        json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"kp21-coredns-nodeport"},"spec":{
+            "type":"NodePort",
+            "selector":{"hedronetes.io/component":"coredns-m1"},
+            "ports":[{"name":"ready","port":8181,"targetPort":"ready","nodePort":30081}]}}),
+    )
+    .await;
+    assert_eq!(service["spec"]["ports"][0]["nodePort"], 30081);
+    labelled_pod(
+        &s,
+        "coredns-m1",
+        json!({"hedronetes.io/component":"coredns-m1"}),
+        ("ready", 8181),
+        "10.42.0.9",
+    )
+    .await;
+    endpoints_once(client.clone(), "default", "kp21-coredns-nodeport")
+        .await
+        .unwrap();
+    let published = managed(&s).await;
+    assert_eq!(
+        published
+            .iter()
+            .map(|sl| sl["metadata"]["labels"]["kubernetes.io/service-name"]
+                .as_str()
+                .unwrap()
+                .to_owned())
+            .collect::<Vec<_>>(),
+        vec!["kp21-coredns-nodeport".to_owned()],
+        "{published:?}"
+    );
+    // The slice must carry the resolved target port the node port DNATs to,
+    // not the published node port.
+    let slice = &published[0];
+    assert_eq!(slice["ports"][0]["name"], "ready");
+    assert_eq!(slice["ports"][0]["port"], json!(8181));
+    let endpoints = slice["endpoints"].as_array().unwrap();
+    assert_eq!(endpoints.len(), 1, "{slice}");
+    assert_eq!(endpoints[0]["addresses"], json!(["10.42.0.9"]));
+    assert_eq!(endpoints[0]["conditions"]["ready"], json!(true));
 }
