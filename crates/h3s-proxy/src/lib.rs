@@ -60,15 +60,10 @@ pub async fn run(
     let mut desired: Option<String> = None;
     let mut desired_valid = false;
     loop {
-        if let Some(rules) = &desired {
-            match backend.reconcile(rules).await {
-                Ok(_) => ready.store(desired_valid, Ordering::Relaxed),
-                Err(error) => {
-                    ready.store(false, Ordering::Relaxed);
-                    eprintln!("{error}; retrying");
-                }
-            }
-        }
+        // A fresh snapshot and plan come first. A Service that just gained
+        // endpoints must never wait behind the maintenance work below: the
+        // kernel's ruleset is only re-read when the new plan changed nothing.
+        let mut replanned = false;
         match api::snapshot(&client, &endpoint).await {
             Ok(snapshot) => {
                 match plan(
@@ -77,12 +72,15 @@ pub async fn run(
                     &snapshot.nodes.items,
                     &config.node_name,
                 )
-                .and_then(|plan| plan.render(&config.owner))
+                .and_then(|plan| plan.render(&config.owner).map(|rules| (plan, rules)))
                 {
-                    Ok(rules) => {
+                    Ok((plan, rules)) => {
                         match backend.reconcile(&rules).await {
                             Ok(changed) => {
                                 if changed {
+                                    for warning in plan.warnings() {
+                                        eprintln!("h3s Service proxy: {warning}");
+                                    }
                                     APPLIES.fetch_add(1, Ordering::Relaxed);
                                     h3s_certs::private::write(
                                         &config.state_dir.join("rules.nft"),
@@ -93,6 +91,7 @@ pub async fn run(
                                 }
                                 desired = Some(rules);
                                 desired_valid = true;
+                                replanned = true;
                                 ready.store(true, Ordering::Relaxed);
                             }
                             Err(error) => {
@@ -118,6 +117,19 @@ pub async fn run(
             Err(error) => {
                 eprintln!("{error}; keeping last valid Service rules");
                 tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        }
+        // Periodic kernel inspection repairs drift and re-states readiness.
+        if !replanned {
+            if let Some(rules) = &desired {
+                match backend.reconcile(rules).await {
+                    Ok(_) => ready.store(desired_valid, Ordering::Relaxed),
+                    Err(error) => {
+                        ready.store(false, Ordering::Relaxed);
+                        eprintln!("{error}; retrying");
+                    }
+                }
             }
         }
     }

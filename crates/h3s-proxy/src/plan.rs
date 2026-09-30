@@ -48,6 +48,9 @@ struct Frontend {
 pub struct Plan {
     pod_cidrs: BTreeSet<Ipv4Net>,
     services: Vec<Frontend>,
+    /// Why a frontend was published without endpoints: a dropped EndpointSlice
+    /// port is never silent.
+    warnings: Vec<String>,
 }
 fn values(v: &Value) -> impl Iterator<Item = &Value> {
     v.as_array().into_iter().flatten()
@@ -174,6 +177,7 @@ pub fn plan(
     let mut frontends = Vec::new();
     let mut tuples = BTreeSet::new();
     let mut ids = BTreeSet::new();
+    let mut warnings = Vec::new();
     let mut total_backends = 0;
     for service in services {
         let spec = &service["spec"];
@@ -198,6 +202,7 @@ pub fn plan(
             "Local" => true,
             _ => return Err(Error::Invalid("unsupported internal traffic policy")),
         };
+        let service_ports = values(&spec["ports"]).count();
         for p in values(&spec["ports"]) {
             let service_port = port(&p["port"])?;
             let protocol = Protocol::parse(&p["protocol"])?;
@@ -213,10 +218,24 @@ pub fn plan(
                     continue;
                 }
                 for sp in values(&slice["ports"]) {
-                    if sp["name"].as_str().unwrap_or("") != port_name
+                    let slice_name = sp["name"].as_str().unwrap_or("");
+                    // A single-port Service may name its port on the Service, on
+                    // the slice, or on neither: the pairing is unambiguous. A
+                    // multi-port Service must name it on both.
+                    let named = !port_name.is_empty() && !slice_name.is_empty();
+                    if (named && slice_name != port_name)
+                        || (!named && service_ports > 1)
                         || sp["protocol"].as_str().unwrap_or("TCP") != protocol.nft().to_uppercase()
                         || sp["port"].is_null()
                     {
+                        warnings.push(format!(
+                            "{ns}/{name}: slice {} port {:?}/{} does not match Service port {:?}/{}",
+                            slice["metadata"]["name"],
+                            slice_name,
+                            sp["protocol"].as_str().unwrap_or("TCP"),
+                            port_name,
+                            protocol.nft().to_uppercase()
+                        ));
                         continue;
                     }
                     let target_port = port(&sp["port"])?;
@@ -258,6 +277,12 @@ pub fn plan(
             );
             if !ids.insert(id.clone()) {
                 return Err(Error::Invalid("duplicate Service chain identity"));
+            }
+            if backends.is_empty() {
+                warnings.push(format!(
+                    "{ns}/{name}: port {service_port}/{} has no ready endpoint",
+                    protocol.nft().to_uppercase()
+                ));
             }
             frontends.push(Frontend {
                 id,
@@ -312,6 +337,7 @@ pub fn plan(
     Ok(Plan {
         pod_cidrs,
         services: frontends,
+        warnings,
     })
 }
 impl Frontend {
@@ -323,6 +349,10 @@ impl Frontend {
     }
 }
 impl Plan {
+    /// Why this plan published a frontend without endpoints.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
     pub fn render(&self, owner: &str) -> Result<String> {
         if owner.len() != 64 || !owner.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Invalid("invalid table ownership digest"));
@@ -632,6 +662,52 @@ mod tests {
             "server"
         )
         .is_err());
+    }
+    /// The live miss: the slice port and the Service port disagreed on the
+    /// name, and the endpoint was dropped without a word. A single-port
+    /// Service pairs with a single-port slice regardless of who named it, and
+    /// any port that still drops is reported.
+    #[test]
+    fn single_port_pairing_survives_a_name_only_on_one_side() {
+        let mut slice = slice();
+        slice["metadata"]["labels"]["kubernetes.io/service-name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["uid"] = json!("new-nodeport");
+        slice["ports"] = json!([{"name":"","port":8181,"protocol":"TCP"}]);
+        let mut nodes = nodes();
+        nodes[0]["status"] = json!({"addresses":[{"type":"InternalIP","address":"192.168.104.1"}]});
+        let named = plan(
+            &[node_port_service()],
+            std::slice::from_ref(&slice),
+            &nodes,
+            "server",
+        )
+        .unwrap();
+        assert!(named.warnings().is_empty(), "{:?}", named.warnings());
+        let rules = named.render(&"a".repeat(64)).unwrap();
+        assert!(rules.contains("dnat to 10.42.0.2:8181"), "{rules}");
+        // A slice port that genuinely cannot be attributed is reported, and
+        // the frontend is still published without endpoints.
+        let mut mismatched = slice.clone();
+        mismatched["ports"] = json!([{"name":"other","port":8181,"protocol":"TCP"}]);
+        let mut multi = node_port_service();
+        multi["spec"]["ports"] = json!([
+            {"name":"ready","port":80,"nodePort":30080,"protocol":"TCP"},
+            {"name":"metrics","port":81,"nodePort":30081,"protocol":"TCP"}
+        ]);
+        let refused = plan(&[multi], &[mismatched], &nodes, "server").unwrap();
+        assert!(
+            refused
+                .warnings()
+                .iter()
+                .any(|w| w.contains("does not match Service port")),
+            "{:?}",
+            refused.warnings()
+        );
+        assert!(refused
+            .warnings()
+            .iter()
+            .any(|w| w.contains("no ready endpoint")));
     }
     #[test]
     fn invalid_addresses_policy_and_incomplete_topology_do_not_produce_rules() {
