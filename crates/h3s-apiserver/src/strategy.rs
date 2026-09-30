@@ -109,7 +109,14 @@ pub(crate) fn prepare(
                 return Err(invalid("workload template restartPolicy must be Always"));
             }
             // A template the node cannot execute is refused here, never
-            // persisted to fail one replica at a time.
+            // persisted to fail one replica at a time. This is the runtime
+            // profile the kubelet validates with, so the template is held to
+            // the same bar as a standalone Pod. The namespace Pod Security
+            // policy is deliberately not re-decided here: the ReplicaSet
+            // controller reports that refusal as a ReplicaFailure condition on
+            // the persisted object, and the operator repairs the template
+            // (`tests/deployment.rs`,
+            // `replicaset_claims_releases_and_reports_real_admission_failure`).
             PodRuntimeProfile.check(&template["spec"]).map_err(|e| {
                 invalid(&format!(
                     "template cannot run under the {} runtime profile ({}): {e}",

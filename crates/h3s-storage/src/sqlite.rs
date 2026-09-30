@@ -16,6 +16,17 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// Open on a blocking worker; callers provide a private, persistent data path.
+    ///
+    /// One server per registry is a *process* lock owned by the server entry
+    /// point, which owns the data directory: `crates/h3s/src/main.rs` takes
+    /// `exclusive_process_lock(<data>/db/.registry.lock)` before this call and
+    /// refuses a second server with "registry ... is locked by another h3s
+    /// server". This opener deliberately adds no lock of its own, so one
+    /// process may hold several connections over one file; their writes are
+    /// serialized by SQLite's writer lock and by the CAS in `mutate`
+    /// (`tests/contract.rs`, `competing_connections_have_one_cas_winner_...`).
+    /// A lock here would not add exclusion across processes, only a second
+    /// failure mode beside the one the server already fails closed on.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let connection = tokio::task::spawn_blocking(move || -> Result<Connection> {

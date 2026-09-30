@@ -210,3 +210,107 @@ pub fn admit(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resources::RESOURCES;
+    use h3s_auth::{node_allows, ResourceRequest, User};
+    use serde_json::json;
+
+    fn node_user(name: &str) -> User {
+        User {
+            name: format!("system:node:{name}"),
+            groups: vec!["system:nodes".into(), "system:authenticated".into()],
+        }
+    }
+    fn target(
+        kind: &str,
+        namespace: Option<&str>,
+        name: &str,
+        subresource: Option<&'static str>,
+    ) -> Target {
+        Target {
+            resource: *RESOURCES
+                .iter()
+                .find(|r| r.kind == kind)
+                .expect("known kind"),
+            namespace: namespace.map(str::to_owned),
+            name: Some(name.into()),
+            subresource,
+        }
+    }
+    fn pod(name: &str, assigned: &str) -> Value {
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"namespace":"team-a","uid":"3e17c2c0-49e2-4f2b-a917-89da3f986647"},"spec":{"nodeName":assigned}})
+    }
+    fn node_object(name: &str) -> Value {
+        json!({"apiVersion":"v1","kind":"Node","metadata":{"name":name},"spec":{}})
+    }
+    fn request(
+        resource: &'static str,
+        name: &'static str,
+        verb: &'static str,
+    ) -> ResourceRequest<'static> {
+        ResourceRequest {
+            verb,
+            group: "",
+            resource,
+            subresource: None,
+            namespace: Some("team-a"),
+            name: Some(name),
+        }
+    }
+
+    /// KP-44: the node authorizer and node admission decide the same request.
+    /// Where the authorizer grants a Pod delete, admission still holds the
+    /// persisted assignment; where the authorizer widens a Node update to any
+    /// name, admission is what keeps a node on its own object.
+    #[test]
+    fn node_grants_and_node_admission_cannot_diverge() {
+        let user = node_user("a");
+        // A Pod delete is a node grant only through a verified relationship.
+        assert!(node_allows(
+            &user,
+            &request("pods", "owned", "delete"),
+            None,
+            true
+        ));
+        assert!(!node_allows(
+            &user,
+            &request("pods", "owned", "delete"),
+            None,
+            false
+        ));
+        let pods = target("Pod", Some("team-a"), "owned", None);
+        let owned = pod("owned", "a");
+        let foreign = pod("owned", "b");
+        assert!(admit(&user, &pods, "delete", &owned, Some(&owned)).is_ok());
+        assert!(admit(&user, &pods, "delete", &foreign, Some(&foreign)).is_err());
+        // Deleting its own Node object is never granted, and admission refuses
+        // it even when RBAC does.
+        assert!(!node_allows(
+            &user,
+            &request("nodes", "a", "delete"),
+            None,
+            true
+        ));
+        let nodes = target("Node", None, "a", None);
+        let own = node_object("a");
+        assert!(admit(&user, &nodes, "delete", &own, Some(&own)).is_err());
+        // A Node update is granted without naming the object, so admission is
+        // the constraint that has to hold: a node may not rename or retarget
+        // any Node object, including by creating a second one.
+        assert!(node_allows(
+            &user,
+            &request("nodes", "b", "update"),
+            None,
+            false
+        ));
+        let other = target("Node", None, "b", None);
+        let renamed = node_object("b");
+        assert!(admit(&user, &other, "update", &renamed, Some(&own)).is_err());
+        assert!(admit(&user, &other, "create", &renamed, None).is_err());
+        // The node's own object stays writable for the fields a node owns.
+        assert!(admit(&user, &nodes, "update", &own, Some(&own)).is_ok());
+    }
+}
