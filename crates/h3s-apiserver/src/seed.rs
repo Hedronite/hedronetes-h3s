@@ -95,6 +95,18 @@ pub(crate) async fn cluster(api: &Api) -> Result {
     ] {
         cluster_role(api, name, rules, user(identity)).await?;
     }
+    // A node mounts the local paths its Pods claim and mints the bound token
+    // each Pod projects. Admission still holds both to a Pod assigned to it.
+    cluster_role(
+        api,
+        "h3s-node-volumes",
+        json!([
+            {"apiGroups":[""],"resources":["persistentvolumeclaims","persistentvolumes"],"verbs":["get"]},
+            {"apiGroups":[""],"resources":["serviceaccounts/token"],"verbs":["create"]}
+        ]),
+        group("system:nodes"),
+    )
+    .await?;
     Ok(())
 }
 

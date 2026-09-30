@@ -539,3 +539,103 @@ async fn scheduler_binding_uses_a_distinct_permission_and_one_cas_winner() {
         409
     );
 }
+
+/// KP-22: the API is its own local-path provisioner, so a claim binds at the
+/// write that creates it and a Pod mounting it is admitted.
+#[tokio::test]
+async fn local_path_claim_binds_provisions_and_mounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    s.namespace("team-a").await;
+    let (code, class) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/apis/storage.k8s.io/v1/storageclasses",
+            json!({"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"name":"local-path"},"provisioner":"h3s.io/local-path"}),
+        )
+        .await;
+    assert_eq!(code, 201, "{class}");
+    let claim = |name: &str| json!({"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":name},"spec":{"accessModes":["ReadWriteOnce"],"storageClassName":"local-path","resources":{"requests":{"storage":"1Gi"}}}});
+    let (code, bound) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/api/v1/namespaces/team-a/persistentvolumeclaims",
+            claim("web-data"),
+        )
+        .await;
+    assert_eq!(code, 201, "{bound}");
+    assert_eq!(bound["status"]["phase"], "Bound");
+    assert_eq!(bound["status"]["capacity"]["storage"], "1073741824");
+    let volume_name = bound["spec"]["volumeName"].as_str().unwrap().to_owned();
+    let (code, volume) = s
+        .json(
+            s.admin(),
+            "GET",
+            &format!("/api/v1/persistentvolumes/{volume_name}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(code, 200, "{volume}");
+    assert_eq!(
+        volume["spec"]["local"]["path"],
+        "/var/lib/hedronetes/local-path/team-a_web-data"
+    );
+    assert_eq!(volume["spec"]["claimRef"]["uid"], bound["metadata"]["uid"]);
+    assert_eq!(volume["spec"]["capacity"]["storage"], "1073741824");
+    // A Pod that mounts the claim is admitted, and the update cannot re-point
+    // a bound claim at another volume.
+    let (code, pod) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/api/v1/namespaces/team-a/pods",
+            json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"writer"},"spec":{
+                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},
+                "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"web-data"}}],
+                "containers":[{"name":"writer","image":"example.invalid/writer:v1","volumeMounts":[{"name":"data","mountPath":"/var/data"}],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}),
+        )
+        .await;
+    assert_eq!(code, 201, "{pod}");
+    let mut repointed = bound.clone();
+    repointed["spec"]["volumeName"] = json!("other-volume");
+    assert_eq!(
+        s.json(
+            s.admin(),
+            "PUT",
+            &format!(
+                "/api/v1/namespaces/team-a/persistentvolumeclaims/{}",
+                bound["metadata"]["name"].as_str().unwrap()
+            ),
+            repointed
+        )
+        .await
+        .0,
+        422
+    );
+    // A claim whose class names another provisioner stays Pending: this API
+    // only provisions what it can actually hand out.
+    let (code, other) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/apis/storage.k8s.io/v1/storageclasses",
+            json!({"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"name":"nfs"},"provisioner":"example.com/nfs"}),
+        )
+        .await;
+    assert_eq!(code, 201, "{other}");
+    let mut unclaimed = claim("unclaimed");
+    unclaimed["spec"]["storageClassName"] = json!("nfs");
+    let (code, pending) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/api/v1/namespaces/team-a/persistentvolumeclaims",
+            unclaimed,
+        )
+        .await;
+    assert_eq!(code, 201, "{pending}");
+    assert_eq!(pending["status"]["phase"], "Pending");
+    assert!(pending["spec"]["volumeName"].is_null(), "{pending}");
+}

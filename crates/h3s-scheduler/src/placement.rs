@@ -259,6 +259,7 @@ pub fn select(
                 "projected",
                 "downwardAPI",
                 "emptyDir",
+                "persistentVolumeClaim",
             ]
             .iter()
             .any(|k| !v[k].is_null())

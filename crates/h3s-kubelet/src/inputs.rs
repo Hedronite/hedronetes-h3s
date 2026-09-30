@@ -31,6 +31,88 @@ pub(super) async fn data(
     }
     decode_data(&v, kind == "secrets", binary)
 }
+/// The local directory a bound claim's volume publishes. Only the API's own
+/// local-path provisioner publishes one, so an unbound claim fails here.
+pub(super) async fn claim(agent: &Agent, ns: &str, claim: &str) -> Result<String> {
+    if !pod::safe_component(ns) || !pod::safe_component(claim) {
+        return Err(invalid("invalid claim reference"));
+    }
+    let (code, v) = agent
+        .request(
+            Method::GET,
+            &format!("api/v1/namespaces/{ns}/persistentvolumeclaims/{claim}"),
+            None,
+        )
+        .await?;
+    if code != 200 {
+        return Err(crate::Error::Status(code));
+    }
+    let volume = v["spec"]["volumeName"]
+        .as_str()
+        .filter(|v| pod::safe_component(v))
+        .ok_or_else(|| invalid("the claim is not bound to a volume"))?;
+    let (code, volume) = agent
+        .request(
+            Method::GET,
+            &format!("api/v1/persistentvolumes/{volume}"),
+            None,
+        )
+        .await?;
+    if code != 200 {
+        return Err(crate::Error::Status(code));
+    }
+    if volume["spec"]["local"].is_null() {
+        return Err(invalid(
+            "only local volumes are mounted by the native kubelet",
+        ));
+    }
+    volume["spec"]["local"]["path"]
+        .as_str()
+        .filter(|p| p.starts_with('/') && p.len() <= 4096 && !p.contains(".."))
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("invalid local volume path"))
+}
+
+/// A bound token for this Pod, minted through the API as the node identity.
+/// The audience is the one the cluster API accepts.
+pub(super) async fn token(
+    agent: &Agent,
+    ns: &str,
+    account: &str,
+    pod_name: &str,
+    uid: &str,
+) -> Result<String> {
+    if [ns, account, pod_name]
+        .iter()
+        .any(|v| !pod::safe_component(v))
+        || uid.is_empty()
+    {
+        return Err(invalid("invalid token subject"));
+    }
+    let (code, v) = agent
+        .request(
+            Method::POST,
+            &format!("api/v1/namespaces/{ns}/serviceaccounts/{account}/token"),
+            Some(serde_json::json!({
+                "apiVersion": "authentication.k8s.io/v1",
+                "kind": "TokenRequest",
+                "spec": {
+                    "audiences": ["https://kubernetes.default.svc"],
+                    "expirationSeconds": 3607,
+                    "boundObjectRef": {"kind": "Pod", "name": pod_name, "uid": uid},
+                },
+            })),
+        )
+        .await?;
+    if code != 201 {
+        return Err(crate::Error::Status(code));
+    }
+    v["status"]["token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("the API returned no token"))
+}
 fn decode_data(v: &Value, secret: bool, binary: bool) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut out = BTreeMap::new();
     for (key, value) in v["data"].as_object().into_iter().flatten() {

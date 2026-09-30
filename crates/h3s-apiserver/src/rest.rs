@@ -21,17 +21,10 @@ pub(crate) async fn execute(
             "resource or subresource is not implemented",
         )
     })?;
-    // `kubectl create token` and an in-cluster projected token both land here.
-    // This API issues no bound ServiceAccount tokens, admission defaults
-    // automountServiceAccountToken=false, and the runtime profile refuses a
-    // token request, so the documented path is an explicit refusal rather than
-    // a generic unknown-route 404.
+    // `kubectl create token` and the kubelet's projected mount both reach this
+    // subresource; the API is the only issuer and verifier of bound tokens.
     if target.subresource == Some("token") {
-        return Err(Failure::new(
-            501,
-            "NotImplemented",
-            "bound ServiceAccount tokens are not implemented: this API issues no tokens, defaults automountServiceAccountToken=false, and refuses an explicit token request",
-        ));
+        return crate::token::create(api, user, &target, &query, request).await;
     }
     let watch = query.get("watch").is_some_and(|v| v == "true" || v == "1");
     let verb = verb(request.method().as_str(), &target, watch)?;

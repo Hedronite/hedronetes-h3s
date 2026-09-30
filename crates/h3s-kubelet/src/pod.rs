@@ -206,7 +206,6 @@ mod tests {
                 "/spec/volumes",
                 json!([{"name":"host","hostPath":{"path":"/"}}]),
             ),
-            ("/spec/automountServiceAccountToken", json!(true)),
         ] {
             let mut bad = p.clone();
             let (parent, key) = pointer.rsplit_once('/').unwrap();

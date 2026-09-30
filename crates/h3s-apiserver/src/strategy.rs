@@ -72,6 +72,7 @@ pub(crate) fn prepare(
             .unwrap_or_else(|| match resource.kind {
                 "Namespace" => json!({"phase":"Active"}),
                 "Pod" => json!({"phase":"Pending"}),
+                "PersistentVolumeClaim" => json!({"phase":"Pending"}),
                 _ => json!({}),
             });
     }
@@ -152,6 +153,9 @@ pub(crate) fn prepare(
             }
         }
         "Service" => service(&mut value["spec"])?,
+        "PersistentVolumeClaim" => claim(&mut value["spec"], old.map(|o| &o["spec"]))?,
+        "PersistentVolume" => volume(&mut value["spec"])?,
+        "StorageClass" => storage_class(&mut value)?,
         "Node" => {
             default(&mut value, "spec", json!({}));
             if let Some(cidr) = value["spec"]["podCIDR"].as_str().filter(|s| !s.is_empty()) {
@@ -366,6 +370,129 @@ fn valid_port(value: &Value) -> Result<()> {
     if value.as_i64().is_none_or(|n| !(1..=65535).contains(&n)) {
         return Err(invalid("port must be in 1..65535"));
     }
+    Ok(())
+}
+/// A resource quantity the local-path driver can allocate, in bytes.
+fn storage(value: &Value, field: &str) -> Result<i64> {
+    value
+        .as_str()
+        .and_then(h3s_api::quantity::Quantity::parse)
+        .and_then(|q| q.as_bytes())
+        .ok_or_else(|| invalid(&format!("{field} must be a resource quantity")))
+}
+fn access_modes(value: &Value) -> Result<()> {
+    let modes = value
+        .as_array()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| invalid("accessModes are required"))?;
+    for mode in modes {
+        one_of(
+            mode,
+            &["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"],
+            "unsupported accessMode",
+        )?;
+    }
+    Ok(())
+}
+/// `PersistentVolumeClaim`. The claim is bound by the API's own local-path
+/// provisioner and is only ever extended, never shrunk or re-pointed.
+fn claim(spec: &mut Value, old: Option<&Value>) -> Result<()> {
+    if !spec.is_object() {
+        return Err(invalid("PersistentVolumeClaim spec is required"));
+    }
+    default(spec, "volumeMode", json!("Filesystem"));
+    one_of(
+        &spec["volumeMode"],
+        &["Filesystem"],
+        "the local-path driver supports Filesystem claims",
+    )?;
+    access_modes(&spec["accessModes"])?;
+    let requested = storage(
+        &spec["resources"]["requests"]["storage"],
+        "resources.requests.storage",
+    )?;
+    if let Some(old) = old {
+        for field in ["storageClassName", "volumeMode"] {
+            if old[field] != spec[field] {
+                return Err(invalid("claim storage class and volume mode are immutable"));
+            }
+        }
+        if old["accessModes"] != spec["accessModes"] {
+            return Err(invalid("claim access modes are immutable"));
+        }
+        if storage(&old["resources"]["requests"]["storage"], "storage")? > requested {
+            return Err(invalid("a claim may not shrink its storage request"));
+        }
+        if old["volumeName"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty() && old["volumeName"] != spec["volumeName"])
+        {
+            return Err(invalid("a bound claim keeps its volume"));
+        }
+    }
+    Ok(())
+}
+/// `PersistentVolume`. Only node-local volumes are implemented; the node that
+/// mounts the claim creates the directory.
+fn volume(spec: &mut Value) -> Result<()> {
+    if !spec.is_object() {
+        return Err(invalid("PersistentVolume spec is required"));
+    }
+    default(spec, "persistentVolumeReclaimPolicy", json!("Delete"));
+    default(spec, "volumeMode", json!("Filesystem"));
+    one_of(
+        &spec["persistentVolumeReclaimPolicy"],
+        &["Delete", "Retain"],
+        "unsupported PersistentVolume reclaim policy",
+    )?;
+    one_of(
+        &spec["volumeMode"],
+        &["Filesystem"],
+        "the local-path driver supports Filesystem volumes",
+    )?;
+    access_modes(&spec["accessModes"])?;
+    storage(&spec["capacity"]["storage"], "capacity.storage")?;
+    if !spec["hostPath"].is_null() {
+        return Err(invalid(
+            "hostPath volumes are not implemented; use a local volume",
+        ));
+    }
+    let path = spec["local"]["path"]
+        .as_str()
+        .filter(|p| p.starts_with('/') && p.len() <= 4096 && !p.contains('\0') && !p.contains(".."))
+        .ok_or_else(|| invalid("a local volume requires an absolute path without . or .."))?;
+    if path.trim_end_matches('/') == "/var/lib/hedronetes/local-path" {
+        return Err(invalid("the local-path driver owns its own directory"));
+    }
+    Ok(())
+}
+/// `StorageClass`. The provisioner name is published, not the driver's code:
+/// only this API's own local-path provisioner acts on a claim.
+fn storage_class(value: &mut Value) -> Result<()> {
+    // A provisioner is a qualified name like `h3s.io/local-path`.
+    let provisioner = value["provisioner"].as_str().unwrap_or("");
+    if !(1..=253).contains(&provisioner.len())
+        || provisioner.contains("..")
+        || provisioner.starts_with('/')
+        || provisioner.ends_with('/')
+        || !provisioner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    {
+        return Err(invalid("StorageClass provisioner is required"));
+    }
+    default(value, "reclaimPolicy", json!("Delete"));
+    default(value, "volumeBindingMode", json!("Immediate"));
+    one_of(
+        &value["reclaimPolicy"],
+        &["Delete", "Retain"],
+        "unsupported StorageClass reclaim policy",
+    )?;
+    one_of(
+        &value["volumeBindingMode"],
+        &["Immediate"],
+        "only immediate volume binding is implemented",
+    )?;
     Ok(())
 }
 fn service(spec: &mut Value) -> Result<()> {

@@ -1,9 +1,13 @@
 use k8s_openapi::api::{
     apps::v1::{Deployment, ReplicaSet},
     coordination::v1::Lease,
-    core::v1::{ConfigMap, Namespace, Node, Pod, Secret, Service, ServiceAccount},
+    core::v1::{
+        ConfigMap, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service,
+        ServiceAccount,
+    },
     discovery::v1::EndpointSlice,
     rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding},
+    storage::v1::StorageClass,
 };
 use serde_json::Value;
 
@@ -121,6 +125,27 @@ pub(crate) const RESOURCES: &[Resource] = &[
         kind: "ClusterRoleBinding",
         namespaced: false,
     },
+    Resource {
+        group: "",
+        version: "v1",
+        plural: "persistentvolumes",
+        kind: "PersistentVolume",
+        namespaced: false,
+    },
+    Resource {
+        group: "",
+        version: "v1",
+        plural: "persistentvolumeclaims",
+        kind: "PersistentVolumeClaim",
+        namespaced: true,
+    },
+    Resource {
+        group: "storage.k8s.io",
+        version: "v1",
+        plural: "storageclasses",
+        kind: "StorageClass",
+        namespaced: false,
+    },
 ];
 impl Resource {
     pub fn valid_name(&self, name: &str) -> bool {
@@ -141,7 +166,13 @@ impl Resource {
     pub fn has_status(&self) -> bool {
         matches!(
             self.kind,
-            "Pod" | "Node" | "Service" | "Namespace" | "Deployment" | "ReplicaSet"
+            "Pod"
+                | "Node"
+                | "Service"
+                | "Namespace"
+                | "Deployment"
+                | "ReplicaSet"
+                | "PersistentVolumeClaim"
         )
     }
     pub fn has_generation(&self) -> bool {
@@ -176,6 +207,9 @@ impl Resource {
             "RoleBinding" => convert::<RoleBinding>(value),
             "ClusterRole" => convert::<ClusterRole>(value),
             "ClusterRoleBinding" => convert::<ClusterRoleBinding>(value),
+            "PersistentVolume" => convert::<PersistentVolume>(value),
+            "PersistentVolumeClaim" => convert::<PersistentVolumeClaim>(value),
+            "StorageClass" => convert::<StorageClass>(value),
             _ => unreachable!("static resource table"),
         }
     }

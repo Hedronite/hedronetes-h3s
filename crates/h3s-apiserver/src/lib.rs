@@ -15,6 +15,7 @@ mod nodes;
 mod openapi;
 mod patch;
 mod pod_io;
+mod pvc;
 mod read;
 mod resources;
 mod rest;
@@ -24,6 +25,7 @@ mod serviceaccounts;
 mod services;
 mod strategy;
 mod supervisor;
+mod token;
 mod transport;
 mod wire;
 mod write;
@@ -289,7 +291,7 @@ async fn dispatch(api: &Api, peer: Peer, request: Request<Body>) -> Result<Respo
     if path == "/v1-h3s/join" {
         return bootstrap::join(api, request).await;
     }
-    let user = authn::authenticate(peer, &request)?;
+    let user = authn::authenticate(api, peer, authn::credential(&request)?).await?;
     if path == "/v1-h3s/serving" {
         return bootstrap::serving(api, &user, request).await;
     }
