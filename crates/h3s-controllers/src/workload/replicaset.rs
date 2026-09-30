@@ -49,12 +49,14 @@ pub async fn replicaset_once(client: Client, namespace: &str, name: &str) -> Res
     if let Err(error) = &result {
         desired["conditions"] = json!([condition(
             &rs["status"],
-            "ReplicaFailure",
-            "True",
-            "FailedManageReplicas",
-            &failure(error),
-            false,
-            false
+            ConditionSpec {
+                kind: "ReplicaFailure",
+                status: "True",
+                reason: "FailedManageReplicas",
+                message: &failure(error),
+                update: false,
+                deployment: false,
+            }
         )]);
     }
     status(&api, &rs, desired).await?;
