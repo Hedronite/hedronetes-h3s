@@ -83,7 +83,7 @@ fn paths<'a>(paths: impl Iterator<Item = &'a str>) -> Result<()> {
 fn sources(p: &Value) -> Result<Vec<Source<'_>>> {
     let mut out = vec![];
     for v in array(&p["spec"]["volumes"])? {
-        if !v["persistentVolumeClaim"].is_null() {
+        if !v["persistentVolumeClaim"].is_null() || !v["projected"].is_null() {
             continue;
         }
         let (spec, kind, field) = if v["configMap"].is_null() {
@@ -144,6 +144,61 @@ fn payload(source: &Source<'_>, mut data: BTreeMap<String, Vec<u8>>) -> Result<P
     }
     Ok(out)
 }
+/// A projected volume whose sources are the bound token, the cluster CA and the
+/// namespace the API injects for `automountServiceAccountToken`.
+async fn projected_files(agent: &Agent, p: &Value, ns: &str, volume: &Value) -> Result<Payload> {
+    let mut files = Payload::new();
+    for source in array(&volume["projected"]["sources"])? {
+        if !source["serviceAccountToken"].is_null() {
+            let token = &source["serviceAccountToken"];
+            let account = p["spec"]["serviceAccountName"]
+                .as_str()
+                .unwrap_or("default");
+            let issued = inputs::token(
+                agent,
+                ns,
+                account,
+                pod::text(&p["metadata"], "name")?,
+                pod::text(&p["metadata"], "uid")?,
+            )
+            .await?;
+            files.insert(
+                pod::text(token, "path")?.to_owned(),
+                File {
+                    bytes: issued.into_bytes(),
+                    mode: 0o644,
+                },
+            );
+        } else if !source["configMap"].is_null() {
+            let config = &source["configMap"];
+            let name = pod::text(config, "name")?;
+            let optional = config["optional"] == true;
+            let data = inputs::data(agent, ns, "configmaps", name, optional, true).await?;
+            let projected = Source {
+                name: "",
+                object: name,
+                kind: "configmaps",
+                spec: config,
+                optional,
+                mode: mode(&config["defaultMode"], 0o644)?,
+            };
+            for (path, file) in payload(&projected, data)? {
+                files.insert(path, file);
+            }
+        } else if !source["downwardAPI"].is_null() {
+            files.insert(
+                "namespace".into(),
+                File {
+                    bytes: ns.as_bytes().to_vec(),
+                    mode: 0o644,
+                },
+            );
+        } else {
+            return Err(invalid("unsupported projected volume source"));
+        }
+    }
+    Ok(files)
+}
 pub async fn prepare(agent: &Agent, p: &Value, pod_root: &Path) -> Result<()> {
     let sources = sources(p)?;
     let claims = claim_volumes(p)?;
@@ -158,6 +213,13 @@ pub async fn prepare(agent: &Agent, p: &Value, pod_root: &Path) -> Result<()> {
         let data =
             inputs::data(agent, ns, source.kind, source.object, source.optional, true).await?;
         prepared.push((source.name.to_owned(), payload(source, data)?));
+    }
+    for volume in array(&p["spec"]["volumes"])? {
+        if volume["projected"].is_null() {
+            continue;
+        }
+        let files = projected_files(agent, p, ns, volume).await?;
+        prepared.push((pod::text(volume, "name")?.to_owned(), files));
     }
     let account = match automount {
         true => Some(

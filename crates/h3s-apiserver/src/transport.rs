@@ -27,10 +27,16 @@ pub(crate) struct ConnectionContext {
 /// Bound accepted connections and TLS handshake time; shutdown drops all peers.
 pub async fn serve(
     listener: TcpListener,
-    tls: rustls::ServerConfig,
+    mut tls: rustls::ServerConfig,
     router: Router,
     shutdown: impl Future<Output = ()>,
 ) -> io::Result<()> {
+    // Bound this server's TLS records. A handshake carries the whole
+    // certificate chain in one flight, and over an overlay a record larger
+    // than the Pod's path MTU is dropped without an ICMP that the tunnel
+    // carries back, so the client never completes the handshake and this side
+    // sees only a timeout. One kilobyte fits every plausible path here.
+    tls.max_fragment_size = Some(1024);
     let lifecycle = CancellationToken::new();
     let _cancel_on_drop = lifecycle.clone().drop_guard();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
@@ -42,12 +48,47 @@ pub async fn serve(
             _=&mut shutdown=>break,
             Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
             accepted=listener.accept()=>{
-                let (stream,_)=accepted?;
-                let Ok(permit)=permits.clone().try_acquire_owned() else{drop(stream);continue;};
+                let (stream,peer_address)=accepted?;
+                // A rejected or abandoned connection is logged with its peer:
+                // a client that is dropped here sees an empty TLS record and a
+                // reset, which is indistinguishable from a broken path.
+                // Wait briefly for a slot instead of dropping the socket. A
+                // dropped socket is a reset in the client's TLS handshake,
+                // which is indistinguishable from a broken datapath.
+                let permit=match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    permits.clone().acquire_owned(),
+                ).await {
+                    Ok(Ok(permit))=>permit,
+                    Ok(Err(_))=>continue,
+                    Err(_)=>{
+                        eprintln!("h3s apiserver: connection capacity reached, refusing {peer_address}");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let acceptor=acceptor.clone();let router=router.clone();
                 let context=ConnectionContext {shutdown:lifecycle.clone(),_permit:Arc::new(permit)};
                 tasks.spawn(async move {
-                    let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(10),acceptor.accept(stream)).await else{return;};
+                    // A Pod reaching the API crosses a bridge and a NAT before the
+                    // first byte arrives, so a handshake that is merely slow must
+                    // not be aborted while the client still waits: the client only
+                    // sees the socket close, which it reports as a failed TLS
+                    // record. The deadline is long enough for a path that stalls
+                    // and recovers, and every outcome is logged with how far the
+                    // connection got.
+                    let started=std::time::Instant::now();
+                    let stream=match tokio::time::timeout(Duration::from_secs(30),acceptor.accept(stream)).await {
+                        Ok(Ok(stream))=>stream,
+                        Ok(Err(error))=>{
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} failed after {}ms: {error}",started.elapsed().as_millis());
+                            return;
+                        }
+                        Err(_)=>{
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} timed out after {}ms",started.elapsed().as_millis());
+                            return;
+                        }
+                    };
                     let user=match stream.get_ref().1.peer_certificates().and_then(|c|c.first()) {
                         Some(cert)=>match User::from_verified_certificate(cert.as_ref()){Ok(user)=>Some(user),Err(_)=>return},None=>None,
                     };
