@@ -49,7 +49,7 @@ Status: **0.9.1** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd6
 | Pattern | Role | When |
 | --- | --- | --- |
 | **A — agentic node** | h3s registers as a Node; stock scheduler places Pods with selectors/affinity | **Primary** — join the cluster you already run |
-| **C — RuntimeClass / pool** | Label/taint a node pool; `restricted-v1` agents on stock runtime | **Day-0 on-ramp** before a custom node joins |
+| **C — labeled pool** | Label/taint dedicated Nodes; the scheduler places agent workloads by nodeSelector, nodeAffinity, and tolerations | **Day-0 on-ramp** before a custom node joins |
 | **B — operator + CRDs** | AgentFleet-style lifecycle above raw Pods | **Grow-up** when workloads need richer control |
 | **Nested h3s** | Team sandbox API inside the stock cluster | **Middle** option — explicit advanced chapter |
 | **Federation** | Multi-cluster views | **Enterprise only** — not the default README path |
@@ -68,6 +68,8 @@ For CI, labs, and small clusters: run `h3s server` and `h3s agent` as a self-con
 ## Docs
 
 - Full product specification: [`SPEC.md`](./SPEC.md).
+- Security: how to report vulnerabilities — [`SECURITY.md`](./SECURITY.md).
+- Design and checkpoint notes under [`docs/`](./docs): [`server-agent`](./docs/server-agent.md) · [`workload-api`](./docs/workload-api.md) · [`workload-controllers`](./docs/workload-controllers.md) · [`scheduler`](./docs/scheduler.md) · [`pod-runtime`](./docs/pod-runtime.md) · [`admission`](./docs/admission.md) · [`serviceaccounts`](./docs/serviceaccounts.md) · [`service-networking`](./docs/service-networking.md) · [`service-endpoints`](./docs/service-endpoints.md) · [`node-access`](./docs/node-access.md) · [`node-cidr-allocation`](./docs/node-cidr-allocation.md) · [`strategic-patches`](./docs/strategic-patches.md) · [`configuration-volumes`](./docs/configuration-volumes.md) · [`security-foundation`](./docs/security-foundation.md) · [`supervisor-tunnel`](./docs/supervisor-tunnel.md) · [`worker-bootstrap`](./docs/worker-bootstrap.md) · [`cri-runtime`](./docs/cri-runtime.md) · [`flannel-cni`](./docs/flannel-cni.md) · [`flannel-packaging`](./docs/flannel-packaging.md) · [`api-foundation`](./docs/api-foundation.md). Documents titled “checkpoint” are historical build-phase records; see [`SPEC.md`](./SPEC.md) §16 for the current roadmap.
 
 ## Implemented API
 
@@ -116,7 +118,7 @@ kubectl apply -f examples/supported-pod.yaml
 | ClusterIP | yes | IPv4 TCP/UDP nftables proxy |
 | Headless (`clusterIP: None`) | yes | no virtual IP (in development) |
 | ExternalName | yes | no dataplane rules |
-| NodePort / LoadBalancer | in developent | — |
+| NodePort / LoadBalancer | in development | — |
 
 ## Platform services (Facet + HedronDB)
 

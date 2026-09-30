@@ -777,64 +777,79 @@ RBAC, admission, or seccomp.
 
 ## 16. Roadmap and definition of done
 
-### v0.0 — workspace
+### One release axis
 
-- Repo, license, CI (`fmt`, `clippy`, `test`)
-- `h3s --version` / `h3s server --help`
-- Cert bootstrap in `h3s-certs`
-- `Storage` trait + memory + sqlite backends, unit tests
+This document was drafted against the v0.9.0 tree (see the header). Its
+original planning milestones were labeled `v0.0`–`v0.3` plus `v1.0`; the
+project ships releases as `v0.9.x`, `v0.10.x`, and reserves `v1.0.0`. Those
+old labels are **mapped onto the release axis below**, not carried as a
+second versioning axis.
 
-### v0.1 — “kind, but native”
+| Release | Milestone | Old planning label it realizes |
+| --- | --- | --- |
+| **v0.9.0** (shipped, tag) | **M1 subset** — the first release that runs a cluster: two hosts, restricted non-root Pods, ClusterIP | “v0.1 — kind, but native” plus the single-server parts of “v0.2 — k3s-shaped” that already existed at that tag |
+| **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
+| **v0.10.0** (in development) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods run end to end | the remainder of “v0.2 — k3s-shaped” that holds without HA |
+| **v1.0.0** (reserved) | **M2** — etcd/Postgres HA, security MUSTs, official conformance | “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
-- API server CRUD for core/v1 Namespace, ConfigMap, Secret, Pod, Service,
-  Node + apps/v1 ReplicaSet, Deployment
-- Watch works for those types (bookmarks MAY be incomplete)
-- RBAC bootstrap
-- ReplicaSet + Deployment controllers
-- Scheduler: resource fit + node selector
-- CRI kubelet on containerd + youki
-- `kubectl apply -f deploy.yaml` runs a container on a single node
+### v0.9.0 — M1 subset (shipped)
 
-**DoD:** one Linux host, one binary, a Deployment becomes a running container.
+- API server CRUD + watch for core/v1 (Namespace, ConfigMap, Secret, Pod,
+  Service, Node, ServiceAccount) and apps/v1 (Deployment, ReplicaSet); RBAC
+  bootstrap; ReplicaSet and Deployment controllers; scheduler with
+  resource fit, nodeSelector, affinity, and tolerations; CRI kubelet on
+  containerd; agent join with token; supervisor tunnel; nftables
+  kube-proxy for IPv4 ClusterIP; single writing SQLite registry.
+- The runtime profile is the M1 Pod Security subset: non-root UID, dropped
+  ALL capabilities, no privilege escalation, RuntimeDefault seccomp.
 
-### v0.2 — “k3s-shaped”
+### v0.9.1 — structure substrate (shipped)
 
-- Agent join + token
-- Supervisor tunnel
-- nftables kube-proxy, ClusterIP + NodePort
-- CoreDNS + local-path-provisioner
-- probes, projected volumes, logs, exec
-- `--disable=` addons
-- sqlite → etcd upgrade path (`--cluster-init` on an existing sqlite node,
-  same as k3s)
+- Split API dispatch, a single PodRuntimeProfile shared by API admission
+  and kubelet, and a supervisor that restarts failed node tasks. Claims in
+  the README match this tree; where they did not, the docs moved.
 
-**DoD:** two hosts (server + agent), a Service ClusterIP reaches the pod,
-a PVC from local-path mounts.
+### v0.10.0 — k3s-shaped single-server (this line)
 
-### v0.3 — HA and hardening
+Goal: the released two-host cluster behaves as one honest k3s-shaped
+system rather than a collection of parts.
 
-- 3-server etcd or Postgres
-- Lease leader election for controllers
-- NodeRestriction, bound SA tokens
-- Server-Side Apply
-- StatefulSet, Job, DaemonSet
-- Traefik + ServiceLB
-- Secrets encryption
+- Default Pods reach Ready end to end: API admission and kubelet agree on
+  the same runtime profile, and the documented default Pod runs.
+- The API serve loop outlives controller and scheduler death; a stopped
+  task restarts, and an in-flight `kubectl` call is not cancelled.
+- The server takes an exclusive lock on the SQLite registry; a second
+  server against the same data directory fails closed.
+- NodePort, LoadBalancer, local-path PVC, CoreDNS, and the
+  sqlite → etcd upgrade path (`--cluster-init`) remain **owed from the old
+  “v0.2” label**; they land in later v0.10.x/v0.11.x releases as the code
+  ships, and are not to be advertised before that.
 
-**DoD:** kill one server, `kubectl` still works, agents stay Ready.
+**DoD:** one SQLite server plus agents, `kubectl apply` of the documented
+default Pod reaches Running behind a ClusterIP Service, and killing
+in-process control tasks does not kill the API.
 
-### v1.0
+### v1.0.0 — M2 (reserved; contains the old “v0.3” and “v1.0” scopes)
 
-- Conformance at the k3s bar for the pinned minor
-- musl static release binaries, amd64 + arm64
-- Documented backup / restore / upgrade
-- Soak: 50 nodes, not 5,000
-- Security baseline in §15 complete
+Not shipped. Nothing below is present tense.
+
+- Durable high availability: 3-server etcd or Postgres, lease leader
+  election for controllers.
+- Hardening: NodeRestriction, bound ServiceAccount tokens, Server-Side
+  Apply, secrets encryption.
+- Full Kubernetes conformance at the k3s bar for the pinned minor;
+  official conformance runs, not claims.
+- musl static release binaries, amd64 + arm64; documented backup /
+  restore / upgrade.
+- Soak: 50 nodes, not 5,000.
+- Security baseline in §15 complete.
 - Idle single-node server+agent target: **≤ 250 MB RSS** excluding
   containerd and workloads (aspirational vs k3s ~300–500 MB after GOGC
   games). Publish the measured number; do not invent it.
 
-### After v1 (explicitly later)
+**DoD:** kill one server, `kubectl` still works, agents stay Ready.
+
+### After v1.0 (explicitly later)
 
 - Xline store
 - eBPF kube-proxy

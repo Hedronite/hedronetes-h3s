@@ -1,5 +1,7 @@
 # Flannel package and integration checkpoint
 
+> **Historical checkpoint:** written during the M1 build; records the state of the tree at that time, not the current release contract. See [SPEC §16](../SPEC.md) for the release axis.
+
 `nix build .#flannel --option builders "" --option max-jobs 2 --option cores 2`
 builds the project Flannel package on the supported ARM64 Linux flake target.
 It uses upstream 0.28.9 source, the small nil-annotation repair and a fixed Go
