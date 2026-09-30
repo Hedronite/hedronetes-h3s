@@ -1,5 +1,7 @@
 # Workload API checkpoint
 
+> **Historical checkpoint:** written during the M1 build; records the state of the tree at that time, not the current release contract. See [SPEC §16](../SPEC.md) for the release axis.
+
 The API can persist and watch the objects needed by M1's controllers and worker. It does not yet execute containers, register a real worker, reconcile Deployments, or program Service traffic. API fixtures and a stored Node object cannot satisfy those runtime checks.
 
 | API group | Resources | Subresources |

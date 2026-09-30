@@ -50,10 +50,15 @@ impl PodRuntimeProfile {
         }
     }
 
-    /// Whether the runtime can execute this Pod spec exactly as written.
-    /// Generated from the [`Self::CONTRACT_SET`] overlay; not handwritten here.
+    /// Whether the runtime can execute this Pod spec exactly as written. The
+    /// generated overlay is the contract; the execution paths it predates — a
+    /// node-local claim mount and an explicit bound-token request — are
+    /// validated here and removed from the copy the overlay reads.
     pub fn check(&self, spec: &Value) -> Result<()> {
-        crate::pod_profile_gen::check(self, spec)
+        match extension(spec)? {
+            None => crate::pod_profile_gen::check(self, spec),
+            Some(probe) => crate::pod_profile_gen::check(self, &probe),
+        }
     }
 
     /// The identity a container executes with, after every security check
@@ -103,6 +108,63 @@ impl PodRuntimeProfile {
             read_only_root_filesystem: sc["readOnlyRootFilesystem"].as_bool().unwrap_or(false),
         })
     }
+}
+
+/// Volume names the runtime mounts from a node-local claim.
+fn claims(spec: &Value) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for volume in spec["volumes"].as_array().into_iter().flatten() {
+        if volume["persistentVolumeClaim"].is_null() {
+            continue;
+        }
+        let name = volume["name"]
+            .as_str()
+            .filter(|n| safe_component(n))
+            .ok_or(Unsupported("invalid claim volume name"))?
+            .to_owned();
+        let source = &volume["persistentVolumeClaim"];
+        fields(source, &["claimName", "readOnly", "subPath"])?;
+        if !text(source, "claimName").is_ok_and(safe_component) {
+            return Err(Unsupported("invalid claimName"));
+        }
+        if !source["readOnly"].is_null() && !source["readOnly"].is_boolean() {
+            return Err(Unsupported("readOnly must be a boolean"));
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+/// The spec the generated overlay reads: claim volumes and their mounts are
+/// removed, and an explicit bound-token request becomes the profile default.
+fn extension(spec: &Value) -> Result<Option<Value>> {
+    let claims = claims(spec)?;
+    let automount = spec["automountServiceAccountToken"] == true;
+    if claims.is_empty() && !automount {
+        return Ok(None);
+    }
+    let mut probe = spec.clone();
+    probe["automountServiceAccountToken"] = json!(false);
+    if !claims.is_empty() {
+        if let Some(volumes) = probe["volumes"].as_array_mut() {
+            volumes.retain(|v| {
+                !claims
+                    .iter()
+                    .any(|n| v["name"].as_str() == Some(n.as_str()))
+            });
+        }
+        for field in ["containers", "initContainers"] {
+            for container in probe[field].as_array_mut().into_iter().flatten() {
+                if let Some(mounts) = container["volumeMounts"].as_array_mut() {
+                    mounts.retain(|m| {
+                        !claims
+                            .iter()
+                            .any(|n| m["name"].as_str() == Some(n.as_str()))
+                    });
+                }
+            }
+        }
+    }
+    Ok(Some(probe))
 }
 
 /// ConfigMap and Secret volumes only; returns the declared volume names.
@@ -319,7 +381,6 @@ mod tests {
                 "/initContainers",
                 json!([{"name":"init","image":"busybox"}]),
             ),
-            ("/automountServiceAccountToken", json!(true)),
             ("/enableServiceLinks", json!(true)),
             ("/imagePullSecrets", json!([{"name":"registry"}])),
             ("/terminationGracePeriodSeconds", json!(31)),
@@ -444,6 +505,21 @@ mod tests {
         bad["volumes"][0]["configMap"]["items"] =
             json!([{"key":"a","path":"nested"},{"key":"b","path":"nested/mode"}]);
         assert!(PodRuntimeProfile.check(&bad).is_err());
+        // A bound token request and a node-local claim are executed paths.
+        let mut token = spec();
+        token["automountServiceAccountToken"] = json!(true);
+        PodRuntimeProfile.check(&token).unwrap();
+        let mut claim = spec();
+        claim["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"data","persistentVolumeClaim":{"claimName":"web-data"}}));
+        PodRuntimeProfile.check(&claim).unwrap();
+        for bad in ["../escape", "", "a/b"] {
+            let mut refused = claim.clone();
+            refused["volumes"][2]["persistentVolumeClaim"]["claimName"] = json!(bad);
+            assert!(PodRuntimeProfile.check(&refused).is_err(), "{bad}");
+        }
         assert!(PodRuntimeProfile.check(&json!({"containers":[]})).is_err());
         assert!(PodRuntimeProfile.check(&Value::Null).is_err());
         assert_eq!(

@@ -15,6 +15,7 @@ mod nodes;
 mod openapi;
 mod patch;
 mod pod_io;
+mod pvc;
 mod read;
 mod resources;
 mod rest;
@@ -24,6 +25,7 @@ mod serviceaccounts;
 mod services;
 mod strategy;
 mod supervisor;
+mod token;
 mod transport;
 mod wire;
 mod write;
@@ -34,14 +36,33 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json, Router,
 };
-use h3s_storage::{Storage, StoreKey, StoredObject};
+use h3s_storage::{ListSelect, Storage, StoreKey, StoredObject};
 use resources::Target;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 pub use transport::serve;
 use transport::Peer;
 
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+/// A read-only snapshot of what this process has served. `/metrics` renders it;
+/// the API exports nothing itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Requests dispatched, including rejected ones.
+    pub requests: u64,
+    /// Watch streams open right now.
+    pub watches: u64,
+    /// Current registry revision.
+    pub store_revision: u64,
+}
+/// Holds the open-watch gauge for the life of a stream.
+pub(crate) struct WatchGuard(Arc<AtomicU64>);
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 #[derive(Clone)]
 pub struct Api {
     store: Arc<dyn Storage>,
@@ -49,6 +70,8 @@ pub struct Api {
     node_cidrs: Option<h3s_api::network::NodeCidrAllocations>,
     supervisor: Arc<h3s_supervisor::Hub>,
     admission_writes: Arc<tokio::sync::Mutex<()>>,
+    requests: Arc<AtomicU64>,
+    watches: Arc<AtomicU64>,
 }
 #[derive(Debug)]
 struct Failure {
@@ -161,6 +184,8 @@ impl Api {
             node_cidrs: None,
             supervisor: Arc::new(h3s_supervisor::Hub::default()),
             admission_writes: Arc::new(tokio::sync::Mutex::new(())),
+            requests: Arc::new(AtomicU64::new(0)),
+            watches: Arc::new(AtomicU64::new(0)),
         };
         seed::cluster(&api).await?;
         Ok(api)
@@ -217,6 +242,25 @@ impl Api {
     pub fn supervisor(&self) -> Arc<h3s_supervisor::Hub> {
         self.supervisor.clone()
     }
+    /// Count one dispatched request, including rejected ones.
+    pub(crate) fn served(&self) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Count an open watch stream until the returned guard drops with it.
+    pub(crate) fn watching(&self) -> WatchGuard {
+        self.watches.fetch_add(1, Ordering::Relaxed);
+        WatchGuard(self.watches.clone())
+    }
+    /// Read-only counters for `/metrics`, with the current store revision.
+    pub async fn snapshot(&self) -> std::result::Result<Snapshot, h3s_storage::Error> {
+        let mut selection = ListSelect::new("/registry/");
+        selection.limit = 1;
+        Ok(Snapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            watches: self.watches.load(Ordering::Relaxed),
+            store_revision: self.store.list(selection).await?.revision,
+        })
+    }
     pub fn router(self) -> Router {
         Router::new().fallback(handle).with_state(Arc::new(self))
     }
@@ -227,6 +271,7 @@ async fn handle(
     Extension(peer): Extension<Peer>,
     request: Request<Body>,
 ) -> Response {
+    api.served();
     match dispatch(&api, peer, request).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
@@ -240,10 +285,13 @@ async fn dispatch(api: &Api, peer: Peer, request: Request<Body>) -> Result<Respo
         return Ok(response);
     }
     authn::forbid_impersonation(&request)?;
+    if path == "/v1-h3s/server/cacerts" {
+        return bootstrap::cacerts(api, request).await;
+    }
     if path == "/v1-h3s/join" {
         return bootstrap::join(api, request).await;
     }
-    let user = authn::authenticate(peer, &request)?;
+    let user = authn::authenticate(api, peer, authn::credential(&request)?).await?;
     if path == "/v1-h3s/serving" {
         return bootstrap::serving(api, &user, request).await;
     }

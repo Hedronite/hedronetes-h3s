@@ -1,5 +1,7 @@
 # Admission enforcement checkpoint
 
+> **Historical checkpoint:** written during the M1 build; records the state of the tree at that time, not the current release contract. See [SPEC §16](../SPEC.md) for the release axis.
+
 The API now enforces Pod Security on normal Pod create, PUT, JSON patch and merge patch before committing registry data. The default is `restricted` in ordinary namespaces (including `default`), and `privileged` in exactly `kube-system`, `kube-public` and `kube-node-lease`. Administrators also pass through this admission check. Namespace writers may select `pod-security.kubernetes.io/enforce` as `restricted`, `baseline` or `privileged`; `enforce-version` accepts `v1.34` or `latest` (currently v1.34). Policy changes persist and affect subsequent requests.
 
 The checker implements baseline host namespace/process/privilege, capabilities, host volume/port/probe, AppArmor, SELinux, proc mount, seccomp and safe-sysctl restrictions. Restricted adds allowed volume sources, no privilege escalation, non-root declarations, explicit seccomp and dropping ALL capabilities with only NET_BIND_SERVICE added. It checks regular, init and ephemeral container entries, including container overrides of Pod security settings. The safe sysctl set includes tcp_rmem/tcp_wmem introduced in v1.32, as verified against the tagged upstream implementation. Linux-only M1 does not grant Windows policy exemptions; user-namespace policy relaxation is not enabled.

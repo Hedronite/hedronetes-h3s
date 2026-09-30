@@ -25,11 +25,6 @@ fn set(value: &mut Value, pointer: &str, v: Value) {
 fn refusals() -> Vec<(&'static str, Value, &'static str)> {
     vec![
         (
-            "/spec/automountServiceAccountToken",
-            json!(true),
-            "token projection",
-        ),
-        (
             "/spec/enableServiceLinks",
             json!(true),
             "service environment",

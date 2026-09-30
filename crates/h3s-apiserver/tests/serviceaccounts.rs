@@ -119,6 +119,92 @@ async fn controller_creates_repairs_and_preserves_namespace_identity_resources()
     assert_eq!(s.json(s.admin(), "GET", sa, json!({})).await.0, 404);
 }
 #[tokio::test]
+async fn bound_tokens_are_issued_accepted_and_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    s.namespace("team-a").await;
+    let path = "/api/v1/namespaces/team-a/serviceaccounts/default/token";
+    let anonymous = || s.pki.client_config(None).unwrap();
+    // This is the request `kubectl create token` sends.
+    let (code, issued) = s
+        .json(
+            s.admin(),
+            "POST",
+            path,
+            json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","spec":{"expirationSeconds":600}}),
+        )
+        .await;
+    assert_eq!(code, 201, "{issued}");
+    assert_eq!(
+        issued["spec"]["audiences"],
+        json!(["https://kubernetes.default.svc"])
+    );
+    assert_eq!(issued["spec"]["expirationSeconds"], json!(600));
+    assert!(issued["status"]["expirationTimestamp"].as_str().is_some());
+    let token = issued["status"]["token"].as_str().unwrap().to_owned();
+    assert!(token.len() >= 32, "{issued}");
+    // The token authenticates with no certificate at all: discovery is granted
+    // to every authenticated subject, a namespace read is not.
+    let bearer = format!("Bearer {token}");
+    let headers = [("authorization", bearer.as_str())];
+    assert_eq!(
+        s.raw(anonymous(), "GET", "/api", json!({}), &headers)
+            .await
+            .status()
+            .as_u16(),
+        200,
+        "the bound token authenticates"
+    );
+    assert_eq!(
+        s.raw(
+            anonymous(),
+            "GET",
+            "/api/v1/namespaces/team-a/configmaps",
+            json!({}),
+            &headers
+        )
+        .await
+        .status()
+        .as_u16(),
+        403,
+        "authenticated as the ServiceAccount, which holds no grant here"
+    );
+    // Nothing else is accepted: an unknown token, or no credential at all.
+    for presented in [
+        "Bearer 0123456789abcdef0123456789abcdef",
+        "Bearer not-a-real-token-not-a-real-token",
+    ] {
+        assert_eq!(
+            s.raw(
+                anonymous(),
+                "GET",
+                "/api/v1/namespaces",
+                json!({}),
+                &[("authorization", presented)]
+            )
+            .await
+            .status()
+            .as_u16(),
+            401,
+            "{presented}"
+        );
+    }
+    assert_eq!(
+        s.raw(anonymous(), "GET", "/api/v1/namespaces", json!({}), &[])
+            .await
+            .status()
+            .as_u16(),
+        401
+    );
+    // A Pod that asks for the token is admitted: the kubelet mounts it.
+    let mut pod = pod("projected");
+    pod["spec"]["automountServiceAccountToken"] = json!(true);
+    let (code, created) = create(&s, pod).await;
+    assert_eq!(code, 201, "{created}");
+    assert_eq!(created["spec"]["automountServiceAccountToken"], true);
+}
+
+#[tokio::test]
 async fn controller_credentials_have_only_required_api_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = Server::start_with_controllers(dir.path()).await;
@@ -262,19 +348,15 @@ async fn accounts_never_project_a_token_and_pull_secrets_are_outside_the_profile
             "{created}"
         );
     }
-    // An explicit token request, inherited pull secrets, or the Pod's own
-    // pull secrets leave the runtime profile: refused, never persisted.
+    // An explicit token request is the bound-token path: admitted, and the
+    // kubelet mounts the token the API issues for this Pod.
     let mut value = pod("explicit");
     value["spec"]["automountServiceAccountToken"] = json!(true);
-    let (code, refused) = create(&s, value).await;
-    assert_eq!(code, 422, "{refused}");
-    assert!(
-        refused["message"]
-            .as_str()
-            .unwrap()
-            .contains("token projection"),
-        "{refused}"
-    );
+    let (code, created) = create(&s, value).await;
+    assert_eq!(code, 201, "{created}");
+    assert_eq!(created["spec"]["automountServiceAccountToken"], true);
+    // Inherited pull secrets, or the Pod's own, still leave the runtime
+    // profile: refused, never persisted.
     let mut value = pod("pulls");
     value["spec"]["serviceAccountName"] = json!("pulling");
     let (code, refused) = create(&s, value).await;
@@ -289,7 +371,7 @@ async fn accounts_never_project_a_token_and_pull_secrets_are_outside_the_profile
     let mut value = pod("own-pull");
     value["spec"]["imagePullSecrets"] = json!([{"name":"own"}]);
     assert_eq!(create(&s, value).await.0, 422);
-    for name in ["explicit", "pulls", "own-pull"] {
+    for name in ["pulls", "own-pull"] {
         assert_eq!(
             s.json(
                 s.admin(),

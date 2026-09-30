@@ -4,7 +4,7 @@
 use crate::{
     admission, bad, http,
     http::Query,
-    key, named, node_cidrs, nodes, now, object, patch,
+    key, named, node_cidrs, nodes, now, object, patch, pvc,
     resources::{self, Target},
     serviceaccounts, services, stored, strategy, wire, Api, Failure, Result,
 };
@@ -294,6 +294,9 @@ impl Write<'_> {
                     admission::runtime(value)?;
                 }
                 "Service" => services::assign(&self.api.store, value, old).await?,
+                "PersistentVolumeClaim" if old.is_none() => {
+                    pvc::bind(&self.api.store, value).await?
+                }
                 _ => {}
             }
         }

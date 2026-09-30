@@ -40,6 +40,14 @@ impl Process {
             fs::read_to_string(&self.log).unwrap()
         );
     }
+    #[cfg(unix)]
+    fn signal(&self, signal: &str) {
+        let status = Command::new("kill")
+            .args([signal, &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
             self.child.kill().unwrap();
@@ -53,11 +61,15 @@ impl Drop for Process {
     }
 }
 fn port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    loop {
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = first.local_addr().unwrap().port();
+        if let Some(admin) = port.checked_add(1) {
+            if TcpListener::bind(("127.0.0.1", admin)).is_ok() {
+                return port;
+            }
+        }
+    }
 }
 fn server_args(dir: &Path, api_port: u16, kubelet_port: u16) -> Vec<String> {
     [
@@ -70,6 +82,8 @@ fn server_args(dir: &Path, api_port: u16, kubelet_port: u16) -> Vec<String> {
         "127.0.0.1".into(),
         "--https-listen-port".into(),
         api_port.to_string(),
+        "--observability-port".into(),
+        "0".into(),
         "--node-name".into(),
         "server-node".into(),
         "--node-ip".into(),
@@ -79,6 +93,24 @@ fn server_args(dir: &Path, api_port: u16, kubelet_port: u16) -> Vec<String> {
     ]
     .into()
 }
+
+async fn admin_get(port: u16, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
 async fn client(dir: &Path, process: &mut Process) -> Client {
     timeout(Duration::from_secs(30), async {
         loop {
@@ -184,11 +216,6 @@ async fn server_and_separate_worker_enroll_and_recover_with_retained_identities_
             "agent".into(),
             "--server".into(),
             enrollment["server"].as_str().unwrap().into(),
-            "--server-ca-file".into(),
-            dir.path()
-                .join("runtime/server/ca.crt")
-                .display()
-                .to_string(),
             "--token-file".into(),
             dir.path()
                 .join("runtime/server/node-token")
@@ -212,6 +239,10 @@ async fn server_and_separate_worker_enroll_and_recover_with_retained_identities_
     );
     let worker_identity_path = worker_dir.path().join("runtime/agent/identity.json");
     let worker_identity = fs::read(&worker_identity_path).unwrap();
+    assert_eq!(
+        fs::read(worker_dir.path().join("runtime/agent/server-ca.crt")).unwrap(),
+        fs::read(dir.path().join("runtime/server/ca.crt")).unwrap(),
+    );
     assert_ne!(identity, worker_identity);
     let ledger_request = || {
         http::Request::get(h3s_api::network::NODE_CIDR_PATH)
@@ -317,6 +348,169 @@ async fn local_agent_failure_is_restarted_with_backoff_and_never_drops_the_api()
     drop(occupied);
     let _ = node(&client, &mut server, "server-node", "192.0.2.10").await;
     health(&client, &mut server, "server-node").await;
+}
+
+#[tokio::test]
+async fn invalid_secure_join_token_is_rejected_after_ca_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let worker_dir = tempfile::tempdir().unwrap();
+    let api_port = port();
+    let mut args = server_args(dir.path(), api_port, port());
+    args.push("--disable-agent".into());
+    let mut server = Process::start(dir.path(), &args);
+    let _client = client(dir.path(), &mut server).await;
+
+    let server_token = fs::read_to_string(dir.path().join("runtime/server/node-token")).unwrap();
+    let mut invalid = server_token.trim().as_bytes().to_vec();
+    let last = invalid.last_mut().unwrap();
+    *last = if *last == b'a' { b'b' } else { b'a' };
+    let token_file = worker_dir.path().join("invalid-token");
+    fs::write(&token_file, invalid).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut worker = Process::start(
+        worker_dir.path(),
+        &[
+            "agent".into(),
+            "--server".into(),
+            format!("https://127.0.0.1:{api_port}"),
+            "--token-file".into(),
+            token_file.display().to_string(),
+            "--data-dir".into(),
+            worker_dir.path().join("runtime").display().to_string(),
+            "--node-name".into(),
+            "invalid-token-worker".into(),
+            "--node-ip".into(),
+            "192.0.2.12".into(),
+        ],
+    );
+    let exit = timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(status) = worker.child.try_wait().unwrap() {
+                break status;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("agent with invalid token did not exit");
+    assert!(!exit.success());
+    let log = fs::read_to_string(&worker.log).unwrap();
+    assert!(log.contains("401"), "{log}");
+    assert!(worker_dir
+        .path()
+        .join("runtime/agent/server-ca.crt")
+        .is_file());
+    server.assert_running();
+}
+
+#[tokio::test]
+async fn memory_store_serves_without_creating_a_registry_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = server_args(dir.path(), port(), port());
+    args.extend(["--disable-agent".into(), "--store".into(), "memory".into()]);
+    let mut server = Process::start(dir.path(), &args);
+    let client = client(dir.path(), &mut server).await;
+    assert!(Api::<Node>::all(client)
+        .list(&ListParams::default())
+        .await
+        .is_ok());
+    assert!(!dir.path().join("runtime/server/db/h3s.db").exists());
+    server.assert_running();
+}
+
+#[tokio::test]
+async fn json_logs_and_metrics_are_live_process_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let api_port = port();
+    let mut args = server_args(dir.path(), api_port, port());
+    args.extend([
+        "--disable-agent".into(),
+        "--log-format".into(),
+        "json".into(),
+    ]);
+    let mut server = Process::start(dir.path(), &args);
+    let _client = client(dir.path(), &mut server).await;
+    let log = fs::read_to_string(&server.log).unwrap();
+    let metrics = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|entry| entry["fields"]["metrics"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("metrics address missing: {log}"));
+    let port = metrics
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|value| value.strip_suffix("/metrics"))
+        .unwrap_or_else(|| panic!("unexpected metrics address: {metrics}"))
+        .parse()
+        .unwrap();
+    let response = admin_get(port, "/metrics").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    for metric in [
+        "h3s_apiserver_requests_total",
+        "h3s_store_revision",
+        "h3s_watchers",
+        "h3s_scheduler_binds_total",
+        "h3s_proxy_apply_total",
+        "h3s_supervisor_restarts_total",
+    ] {
+        assert!(response.contains(metric), "missing {metric}: {response}");
+    }
+    assert!(
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| entry["fields"]["message"] == "h3s server listening"),
+        "{log}"
+    );
+    server.assert_running();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduler_restart_does_not_drop_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = server_args(dir.path(), port(), port());
+    args.push("--disable-agent".into());
+    let mut server = Process::start(dir.path(), &args);
+    let client = client(dir.path(), &mut server).await;
+
+    sleep(Duration::from_millis(200)).await;
+    server.signal("-USR1");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            server.assert_running();
+            let log = fs::read_to_string(&server.log).unwrap();
+            if log.contains("h3s scheduler stopped; restarting in 1s") {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler stop was not supervised");
+
+    sleep(Duration::from_secs(2)).await;
+    server.signal("-USR1");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            server.assert_running();
+            let log = fs::read_to_string(&server.log).unwrap();
+            if log.matches("h3s scheduler received SIGUSR1").count() >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler did not restart");
+
+    assert!(Api::<Node>::all(client)
+        .list(&ListParams::default())
+        .await
+        .is_ok());
+    server.assert_running();
 }
 
 #[tokio::test]

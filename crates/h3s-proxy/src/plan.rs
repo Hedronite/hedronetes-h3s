@@ -35,16 +35,31 @@ struct Backend {
 #[derive(Debug)]
 struct Frontend {
     id: String,
+    /// The published address for a ClusterIP frontend; a node frontend matches
+    /// every local address instead, exactly as kube-proxy does.
     ip: Ipv4Addr,
     port: u16,
     protocol: Protocol,
     local: bool,
     backends: BTreeSet<Backend>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceStatus {
+    pub namespace: String,
+    pub name: String,
+    pub port: u16,
+    pub backends: usize,
+}
+
 #[derive(Debug)]
 pub struct Plan {
     pod_cidrs: BTreeSet<Ipv4Net>,
     services: Vec<Frontend>,
+    /// Why a frontend was published without endpoints: a dropped EndpointSlice
+    /// port is never silent.
+    warnings: Vec<String>,
+    /// What each Service port resolved to, for the proxy's own state file.
+    status: Vec<ServiceStatus>,
 }
 fn values(v: &Value) -> impl Iterator<Item = &Value> {
     v.as_array().into_iter().flatten()
@@ -59,6 +74,13 @@ fn port(v: &Value) -> Result<u16> {
         .filter(|n| (1..=65535).contains(n))
         .map(|n| n as u16)
         .ok_or(Error::Invalid("invalid proxy port"))
+}
+/// An allocated node port, in the published range.
+fn node_port(v: &Value) -> Result<u16> {
+    v.as_u64()
+        .filter(|n| (30000..=32767).contains(n))
+        .map(|n| n as u16)
+        .ok_or(Error::Invalid("invalid Service node port"))
 }
 fn ip(v: &Value) -> Result<Ipv4Addr> {
     let ip = v
@@ -106,6 +128,7 @@ pub fn plan(
     let mut pod_cidrs = BTreeSet::<Ipv4Net>::new();
     let service_range = "10.43.0.0/16".parse::<Ipv4Net>().unwrap();
     let mut own = false;
+    let mut node_ips: Vec<Ipv4Addr> = Vec::new();
     for node in nodes {
         if let Some(cidr) = node["spec"]["podCIDR"].as_str().filter(|s| !s.is_empty()) {
             let subnet = cidr
@@ -125,6 +148,17 @@ pub fn plan(
             }
             if node["metadata"]["name"] == node_name {
                 own = true;
+            }
+        }
+        if node["metadata"]["name"] == node_name {
+            for address in values(&node["status"]["addresses"]) {
+                if !matches!(address["type"].as_str(), Some("InternalIP" | "ExternalIP")) {
+                    continue;
+                }
+                let reported = ip(&address["address"])?;
+                if !node_ips.contains(&reported) {
+                    node_ips.push(reported);
+                }
             }
         }
     }
@@ -152,6 +186,8 @@ pub fn plan(
     let mut frontends = Vec::new();
     let mut tuples = BTreeSet::new();
     let mut ids = BTreeSet::new();
+    let mut warnings = Vec::new();
+    let mut status = Vec::new();
     let mut total_backends = 0;
     for service in services {
         let spec = &service["spec"];
@@ -176,6 +212,7 @@ pub fn plan(
             "Local" => true,
             _ => return Err(Error::Invalid("unsupported internal traffic policy")),
         };
+        let service_ports = values(&spec["ports"]).count();
         for p in values(&spec["ports"]) {
             let service_port = port(&p["port"])?;
             let protocol = Protocol::parse(&p["protocol"])?;
@@ -190,11 +227,28 @@ pub fn plan(
                 {
                     continue;
                 }
+                let slice_ports = values(&slice["ports"]).count();
                 for sp in values(&slice["ports"]) {
-                    if sp["name"].as_str().unwrap_or("") != port_name
+                    let slice_name = sp["name"].as_str().unwrap_or("");
+                    // A slice that publishes one port pairs with a Service that
+                    // has one port by protocol alone: the names are decoration
+                    // on either side. A multi-port pair must name its ports, or
+                    // the endpoint cannot be attributed.
+                    let unambiguous = service_ports <= 1 && slice_ports <= 1;
+                    let named = !port_name.is_empty() && !slice_name.is_empty();
+                    if (!unambiguous && named && slice_name != port_name)
+                        || (!unambiguous && !named)
                         || sp["protocol"].as_str().unwrap_or("TCP") != protocol.nft().to_uppercase()
                         || sp["port"].is_null()
                     {
+                        warnings.push(format!(
+                            "{ns}/{name}: slice {} port {:?}/{} does not match Service port {:?}/{}",
+                            slice["metadata"]["name"],
+                            slice_name,
+                            sp["protocol"].as_str().unwrap_or("TCP"),
+                            port_name,
+                            protocol.nft().to_uppercase()
+                        ));
                         continue;
                     }
                     let target_port = port(&sp["port"])?;
@@ -237,14 +291,60 @@ pub fn plan(
             if !ids.insert(id.clone()) {
                 return Err(Error::Invalid("duplicate Service chain identity"));
             }
+            status.push(ServiceStatus {
+                namespace: ns.to_owned(),
+                name: name.to_owned(),
+                port: service_port,
+                backends: backends.len(),
+            });
+            if backends.is_empty() {
+                warnings.push(format!(
+                    "{ns}/{name}: port {service_port}/{} has no ready endpoint",
+                    protocol.nft().to_uppercase()
+                ));
+            }
             frontends.push(Frontend {
                 id,
                 ip: cluster_ip,
                 port: service_port,
-                protocol,
+                protocol: protocol.clone(),
                 local,
-                backends,
+                backends: backends.clone(),
             });
+            // A NodePort Service adds one frontend on this node's own address
+            // for every node port it published. Node traffic reaches any ready
+            // endpoint; external sources are masqueraded like upstream.
+            if spec["type"] == "NodePort" {
+                let node_port = node_port(&p["nodePort"])?;
+                if node_ips.is_empty() {
+                    return Err(Error::Invalid(
+                        "local node reports no address for NodePort Services",
+                    ));
+                }
+                for node_ip in &node_ips {
+                    if !tuples.insert((*node_ip, node_port, protocol.clone())) {
+                        return Err(Error::Invalid("duplicate Service frontend"));
+                    }
+                    let id = format!(
+                        "svc_{}",
+                        digest(&format!(
+                            "{ns}/{name}/{uid}/{node_ip}/{node_port}/{}/nodeport",
+                            protocol.nft()
+                        ))
+                    );
+                    if !ids.insert(id.clone()) {
+                        return Err(Error::Invalid("duplicate Service chain identity"));
+                    }
+                    frontends.push(Frontend {
+                        id,
+                        ip: *node_ip,
+                        port: node_port,
+                        protocol: protocol.clone(),
+                        local: false,
+                        backends: backends.clone(),
+                    });
+                }
+            }
             if frontends.len() > 4096 {
                 return Err(Error::Invalid("too many Service ports"));
             }
@@ -254,9 +354,19 @@ pub fn plan(
     Ok(Plan {
         pod_cidrs,
         services: frontends,
+        warnings,
+        status,
     })
 }
 impl Plan {
+    /// Why this plan published a frontend without endpoints.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+    /// What each Service port resolved to in this snapshot.
+    pub fn status(&self) -> &[ServiceStatus] {
+        &self.status
+    }
     pub fn render(&self, owner: &str) -> Result<String> {
         if owner.len() != 64 || !owner.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Invalid("invalid table ownership digest"));
@@ -268,10 +378,10 @@ impl Plan {
         writeln!(out, " chain services {{").unwrap();
         for s in &self.services {
             if !s.backends.is_empty() {
+                let address = format!("ip daddr {}", s.ip);
                 writeln!(
                     out,
-                    "  ip daddr {} {} dport {} counter jump {}",
-                    s.ip,
+                    "  {address} {} dport {} counter jump {}",
                     s.protocol.nft(),
                     s.port,
                     s.id
@@ -288,10 +398,10 @@ impl Plan {
             .unwrap();
             for s in &self.services {
                 if s.backends.is_empty() {
+                    let address = format!("ip daddr {}", s.ip);
                     writeln!(
                         out,
-                        "  ip daddr {} {} dport {} counter {}",
-                        s.ip,
+                        "  {address} {} dport {} counter {}",
                         s.protocol.nft(),
                         s.port,
                         if s.local { "drop" } else { "reject" }
@@ -406,6 +516,9 @@ mod tests {
     fn service() -> Value {
         json!({"metadata":{"name":"web","namespace":"test","uid":"new-service"},"spec":{"clusterIP":"10.43.0.10","ports":[{"name":"http","port":80,"protocol":"TCP"},{"name":"dns","port":53,"protocol":"UDP"}]}})
     }
+    fn node_port_service() -> Value {
+        json!({"metadata":{"name":"web-np","namespace":"test","uid":"new-nodeport"},"spec":{"type":"NodePort","clusterIP":"10.43.0.11","externalTrafficPolicy":"Cluster","ports":[{"name":"http","port":80,"nodePort":30080,"protocol":"TCP"}]}})
+    }
     fn slice() -> Value {
         json!({"metadata":{"namespace":"test","labels":{"kubernetes.io/service-name":"web"},"ownerReferences":[{"kind":"Service","name":"web","uid":"new-service"}]},"addressType":"IPv4","ports":[{"name":"http","port":8080,"protocol":"TCP"},{"name":"dns","port":1053,"protocol":"UDP"}],"endpoints":[{"addresses":["10.42.0.2"],"nodeName":"server","conditions":{"ready":true}},{"addresses":["10.42.2.2"],"nodeName":"worker"}]})
     }
@@ -506,6 +619,106 @@ mod tests {
                 .unwrap()
         );
         assert!(p.render("\";flush ruleset;").is_err());
+    }
+    #[test]
+    fn node_port_frontends_use_the_local_address_and_require_it() {
+        let mut slice = slice();
+        slice["metadata"]["labels"]["kubernetes.io/service-name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["uid"] = json!("new-nodeport");
+        slice["ports"] = json!([{"name":"http","port":8080,"protocol":"TCP"}]);
+        let mut addressed = nodes();
+        addressed[0]["status"] = json!({"addresses":[{"type":"Hostname","address":"server"},{"type":"InternalIP","address":"192.168.104.3"},{"type":"ExternalIP","address":"192.168.104.4"}]});
+        addressed[1]["status"] =
+            json!({"addresses":[{"type":"InternalIP","address":"192.168.104.4"}]});
+        let p = plan(
+            &[node_port_service()],
+            std::slice::from_ref(&slice),
+            &addressed,
+            "server",
+        )
+        .unwrap();
+        // The ClusterIP frontend and one node frontend per reported address.
+        assert_eq!(p.services.len(), 3);
+        let rules = p.render(&"a".repeat(64)).unwrap();
+        assert!(rules.contains("ip daddr 10.43.0.11 tcp dport 80 counter jump svc_"));
+        // The node port answers on every address the Node reports, using only
+        // constructs this proxy already installs.
+        assert!(rules.contains("ip daddr 192.168.104.3 tcp dport 30080 counter jump svc_"));
+        assert!(rules.contains("ip daddr 192.168.104.4 tcp dport 30080 counter jump svc_"));
+        assert!(rules.contains("dnat to 10.42.0.2:8080"));
+        assert!(rules.contains(
+            "ct status dnat ct original ip daddr 192.168.104.3 meta l4proto tcp ct original proto-dst 30080"
+        ));
+        // `ct original` is a direction qualifier and must be followed by a key.
+        // `ct original meta l4proto` is not nft syntax: a ruleset containing it
+        // is rejected whole, so the previous table stays installed and a node
+        // port silently keeps its empty-endpoint reject.
+        assert!(!rules.contains("ct original meta"), "{rules}");
+        assert!(!rules.contains("fib "), "unverified nft construct: {rules}");
+        // No reported InternalIP means no node frontend can be programmed.
+        assert!(
+            plan(&[node_port_service()], &[slice.clone()], &nodes(), "server").is_err(),
+            "a node without an InternalIP cannot publish node ports"
+        );
+        // Two Services cannot own one node port.
+        let mut second = node_port_service();
+        second["metadata"]["name"] = json!("other-np");
+        second["metadata"]["uid"] = json!("other-nodeport");
+        second["spec"]["clusterIP"] = json!("10.43.0.12");
+        assert!(plan(
+            &[node_port_service(), second],
+            &[slice],
+            &addressed,
+            "server"
+        )
+        .is_err());
+    }
+    /// The live miss: the slice port and the Service port disagreed on the
+    /// name, and the endpoint was dropped without a word. A single-port
+    /// Service pairs with a single-port slice regardless of who named it, and
+    /// any port that still drops is reported.
+    #[test]
+    fn single_port_pairing_survives_a_name_only_on_one_side() {
+        let mut slice = slice();
+        slice["metadata"]["labels"]["kubernetes.io/service-name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["uid"] = json!("new-nodeport");
+        slice["ports"] = json!([{"name":"","port":8181,"protocol":"TCP"}]);
+        let mut nodes = nodes();
+        nodes[0]["status"] = json!({"addresses":[{"type":"InternalIP","address":"192.168.104.1"}]});
+        let named = plan(
+            &[node_port_service()],
+            std::slice::from_ref(&slice),
+            &nodes,
+            "server",
+        )
+        .unwrap();
+        assert!(named.warnings().is_empty(), "{:?}", named.warnings());
+        let rules = named.render(&"a".repeat(64)).unwrap();
+        assert!(rules.contains("dnat to 10.42.0.2:8181"), "{rules}");
+        // A slice port that genuinely cannot be attributed is reported, and
+        // the frontend is still published without endpoints.
+        let mut mismatched = slice.clone();
+        mismatched["ports"] = json!([{"name":"other","port":8181,"protocol":"TCP"}]);
+        let mut multi = node_port_service();
+        multi["spec"]["ports"] = json!([
+            {"name":"ready","port":80,"nodePort":30080,"protocol":"TCP"},
+            {"name":"metrics","port":81,"nodePort":30081,"protocol":"TCP"}
+        ]);
+        let refused = plan(&[multi], &[mismatched], &nodes, "server").unwrap();
+        assert!(
+            refused
+                .warnings()
+                .iter()
+                .any(|w| w.contains("does not match Service port")),
+            "{:?}",
+            refused.warnings()
+        );
+        assert!(refused
+            .warnings()
+            .iter()
+            .any(|w| w.contains("no ready endpoint")));
     }
     #[test]
     fn invalid_addresses_policy_and_incomplete_topology_do_not_produce_rules() {

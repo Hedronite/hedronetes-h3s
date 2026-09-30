@@ -206,7 +206,6 @@ mod tests {
                 "/spec/volumes",
                 json!([{"name":"host","hostPath":{"path":"/"}}]),
             ),
-            ("/spec/automountServiceAccountToken", json!(true)),
         ] {
             let mut bad = p.clone();
             let (parent, key) = pointer.rsplit_once('/').unwrap();
@@ -233,6 +232,27 @@ mod tests {
                 .as_ref()
                 .map(|v| v.value),
             Some(1000)
+        );
+    }
+    /// KP-10: the default Pod path across the API/kubelet boundary. The write
+    /// path applies exactly `PodRuntimeProfile::defaults` before a Pod exists
+    /// and this module validates the result, so a stock restricted Pod that
+    /// states no token field must execute with no other unpublished field.
+    #[test]
+    fn api_defaults_are_the_pod_this_validator_executes() {
+        let mut pod = json!({"metadata":{"name":"web","namespace":"team-a","uid":"3e17c2c0-49e2-4f2b-a917-89da3f986647"},
+            "spec":{"nodeName":"worker","containers":[{"name":"web","image":"busybox:1.37.0","securityContext":{"runAsNonRoot":true,"runAsUser":65534,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}});
+        let unstated = validate(&pod, "worker").unwrap_err().to_string();
+        assert!(unstated.contains("token projection"), "{unstated}");
+        PodRuntimeProfile.defaults(&mut pod["spec"]);
+        assert_eq!(pod["spec"]["automountServiceAccountToken"], false);
+        assert_eq!(pod["spec"]["enableServiceLinks"], false);
+        validate(&pod, "worker").unwrap();
+        let execution = security(&pod, &pod["spec"]["containers"][0]).unwrap();
+        assert_eq!(execution.run_as_user.as_ref().map(|v| v.value), Some(65534));
+        assert_eq!(
+            execution.run_as_group.as_ref().map(|v| v.value),
+            Some(65534)
         );
     }
     #[test]

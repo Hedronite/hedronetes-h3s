@@ -49,7 +49,7 @@ Status: **0.9.1** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd6
 | Pattern | Role | When |
 | --- | --- | --- |
 | **A — agentic node** | h3s registers as a Node; stock scheduler places Pods with selectors/affinity | **Primary** — join the cluster you already run |
-| **C — RuntimeClass / pool** | Label/taint a node pool; `restricted-v1` agents on stock runtime | **Day-0 on-ramp** before a custom node joins |
+| **C — labeled pool** | Label/taint dedicated Nodes; the scheduler places agent workloads by nodeSelector, nodeAffinity, and tolerations | **Day-0 on-ramp** before a custom node joins |
 | **B — operator + CRDs** | AgentFleet-style lifecycle above raw Pods | **Grow-up** when workloads need richer control |
 | **Nested h3s** | Team sandbox API inside the stock cluster | **Middle** option — explicit advanced chapter |
 | **Federation** | Multi-cluster views | **Enterprise only** — not the default README path |
@@ -65,9 +65,21 @@ Inspired by the k3s single-binary shape; reimplemented in Rust without embedding
 
 For CI, labs, and small clusters: run `h3s server` and `h3s agent` as a self-contained binary pair (see [Binary](#binary)). This path exercises the full control plane. Production teams on EKS/GKE typically start by joining an existing cluster instead.
 
+## CI boundaries
+
+GitHub CI on `ubuntu-latest` runs three jobs (no Sonobuoy, no conformance suites):
+
+- **`cargo build and test`** (`build` job) on the current Rust toolchain: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, `cargo build --workspace --locked`, and `cargo test --workspace --locked`.
+- **Rust 1.88 minimum support** (`minimum-rust` job): `cargo +1.88.0 test --workspace --locked`.
+- **Dependency advisories** (`dependency-advisories` job): `cargo deny check advisories`.
+
+CI proves the Rust workspace compiles, lints, and unit/integration-tests that run in-process. It does **not** run the working cluster topology: two-node server+agent with containerd, Flannel, and the nftables proxy is the **documented lab** — see [`server-agent`](./docs/server-agent.md), [`supervisor-tunnel`](./docs/supervisor-tunnel.md), and [`service-networking`](./docs/service-networking.md); the harness lives in `integration/tower/`. A change can pass CI and still need a lab check at release time.
+
 ## Docs
 
 - Full product specification: [`SPEC.md`](./SPEC.md).
+- Security: how to report vulnerabilities — [`SECURITY.md`](./SECURITY.md).
+- Design and checkpoint notes under [`docs/`](./docs): [`addons`](./docs/addons.md) · [`server-agent`](./docs/server-agent.md) · [`workload-api`](./docs/workload-api.md) · [`workload-controllers`](./docs/workload-controllers.md) · [`scheduler`](./docs/scheduler.md) · [`pod-runtime`](./docs/pod-runtime.md) · [`admission`](./docs/admission.md) · [`serviceaccounts`](./docs/serviceaccounts.md) · [`service-networking`](./docs/service-networking.md) · [`service-endpoints`](./docs/service-endpoints.md) · [`node-access`](./docs/node-access.md) · [`node-cidr-allocation`](./docs/node-cidr-allocation.md) · [`strategic-patches`](./docs/strategic-patches.md) · [`configuration-volumes`](./docs/configuration-volumes.md) · [`security-foundation`](./docs/security-foundation.md) · [`supervisor-tunnel`](./docs/supervisor-tunnel.md) · [`worker-bootstrap`](./docs/worker-bootstrap.md) · [`cri-runtime`](./docs/cri-runtime.md) · [`flannel-cni`](./docs/flannel-cni.md) · [`flannel-packaging`](./docs/flannel-packaging.md) · [`api-foundation`](./docs/api-foundation.md). Documents titled “checkpoint” are historical build-phase records; see [`SPEC.md`](./SPEC.md) §16 for the current roadmap.
 
 ## Implemented API
 
@@ -91,7 +103,7 @@ Stock `kubectl` and Helm work against these kinds only (Kubernetes **v1.34** wir
 | rbac.authorization.k8s.io | v1 | ClusterRole | cluster |
 | rbac.authorization.k8s.io | v1 | ClusterRoleBinding | cluster |
 
-StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are in development.
+StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are **not shipped**; they are in development.
 
 ## Supported workloads
 
@@ -116,7 +128,15 @@ kubectl apply -f examples/supported-pod.yaml
 | ClusterIP | yes | IPv4 TCP/UDP nftables proxy |
 | Headless (`clusterIP: None`) | yes | no virtual IP (in development) |
 | ExternalName | yes | no dataplane rules |
-| NodePort / LoadBalancer | in developent | — |
+| NodePort / LoadBalancer | not shipped (in development) | — |
+
+## Add-ons
+
+- Flavor follows k3s: optional cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
+- **Shipped today:** `h3s server --disable-agent` runs the control plane + datastore + supervisor without the embedded local agent.
+- **CoreDNS:** in development as the packaged add-on; **not shipped**. The cluster PKI already issues the `system:coredns` client identity, so CoreDNS can be run manually against a lab cluster, but no add-on manager applies it today.
+- **`--disable=`** (k3s-style, comma-separated add-on names): in development; **not shipped** until there are add-ons to disable.
+- **Flannel:** an explicit host daemon (systemd unit via the Nix flake), not a h3s add-on and never a DaemonSet. Run it per node yourself. See [`docs/addons.md`](./docs/addons.md).
 
 ## Platform services (Facet + HedronDB)
 

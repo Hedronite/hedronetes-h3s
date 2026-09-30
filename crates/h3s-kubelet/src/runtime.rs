@@ -279,7 +279,7 @@ impl Runtime {
                 command: pod::strings(&c["command"])?,
                 args: pod::strings(&c["args"])?,
                 working_dir: c["workingDir"].as_str().unwrap_or("").into(),
-                mounts: volumes::mounts(c, &root)?,
+                mounts: volumes::mounts(p, c, &root)?,
                 labels,
                 linux: Some(LinuxContainerConfig {
                     resources: Some(pod::resources(c)?),

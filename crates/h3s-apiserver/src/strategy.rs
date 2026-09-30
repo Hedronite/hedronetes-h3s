@@ -21,22 +21,18 @@ fn one_of(value: &Value, choices: &[&str], field: &str) -> Result<()> {
     Ok(())
 }
 
-/// Helm release drivers rebuild ConfigMaps and Secrets without resourceVersion.
+/// Helm's release driver rebuilds its storage objects with a blind PUT, so
+/// those objects must not need a resourceVersion. Only what Helm itself stores
+/// may skip the precondition: Helm's release-storage name, its ownership label,
+/// and for Secrets its release type. A ConfigMap or Secret that merely claims
+/// the label stays an ordinary object under CAS.
 pub(crate) fn helm_owned(value: &Value, kind: &str) -> bool {
-    if kind == "Secret" && value.get("type").and_then(Value::as_str) == Some("helm.sh/release.v1") {
-        return true;
-    }
-    if value["metadata"]["labels"]["owner"].as_str() == Some("helm") {
-        return true;
-    }
-    if kind == "Secret" {
-        if let Some(name) = value["metadata"]["name"].as_str() {
-            if name.starts_with("sh.helm.release.v1.") {
-                return true;
-            }
-        }
-    }
-    false
+    let Some(name) = value["metadata"]["name"].as_str() else {
+        return false;
+    };
+    name.starts_with("sh.helm.release.v1.")
+        && value["metadata"]["labels"]["owner"].as_str() == Some("helm")
+        && (kind == "ConfigMap" || value["type"].as_str() == Some("helm.sh/release.v1"))
 }
 
 /// Copy `key` from `from`, leaving it absent rather than null when unset so
@@ -76,6 +72,7 @@ pub(crate) fn prepare(
             .unwrap_or_else(|| match resource.kind {
                 "Namespace" => json!({"phase":"Active"}),
                 "Pod" => json!({"phase":"Pending"}),
+                "PersistentVolumeClaim" => json!({"phase":"Pending"}),
                 _ => json!({}),
             });
     }
@@ -109,7 +106,14 @@ pub(crate) fn prepare(
                 return Err(invalid("workload template restartPolicy must be Always"));
             }
             // A template the node cannot execute is refused here, never
-            // persisted to fail one replica at a time.
+            // persisted to fail one replica at a time. This is the runtime
+            // profile the kubelet validates with, so the template is held to
+            // the same bar as a standalone Pod. The namespace Pod Security
+            // policy is deliberately not re-decided here: the ReplicaSet
+            // controller reports that refusal as a ReplicaFailure condition on
+            // the persisted object, and the operator repairs the template
+            // (`tests/deployment.rs`,
+            // `replicaset_claims_releases_and_reports_real_admission_failure`).
             PodRuntimeProfile.check(&template["spec"]).map_err(|e| {
                 invalid(&format!(
                     "template cannot run under the {} runtime profile ({}): {e}",
@@ -149,6 +153,9 @@ pub(crate) fn prepare(
             }
         }
         "Service" => service(&mut value["spec"])?,
+        "PersistentVolumeClaim" => claim(&mut value["spec"], old.map(|o| &o["spec"]))?,
+        "PersistentVolume" => volume(&mut value["spec"])?,
+        "StorageClass" => storage_class(&mut value)?,
         "Node" => {
             default(&mut value, "spec", json!({}));
             if let Some(cidr) = value["spec"]["podCIDR"].as_str().filter(|s| !s.is_empty()) {
@@ -365,6 +372,129 @@ fn valid_port(value: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// A resource quantity the local-path driver can allocate, in bytes.
+fn storage(value: &Value, field: &str) -> Result<i64> {
+    value
+        .as_str()
+        .and_then(h3s_api::quantity::Quantity::parse)
+        .and_then(|q| q.as_bytes())
+        .ok_or_else(|| invalid(&format!("{field} must be a resource quantity")))
+}
+fn access_modes(value: &Value) -> Result<()> {
+    let modes = value
+        .as_array()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| invalid("accessModes are required"))?;
+    for mode in modes {
+        one_of(
+            mode,
+            &["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"],
+            "unsupported accessMode",
+        )?;
+    }
+    Ok(())
+}
+/// `PersistentVolumeClaim`. The claim is bound by the API's own local-path
+/// provisioner and is only ever extended, never shrunk or re-pointed.
+fn claim(spec: &mut Value, old: Option<&Value>) -> Result<()> {
+    if !spec.is_object() {
+        return Err(invalid("PersistentVolumeClaim spec is required"));
+    }
+    default(spec, "volumeMode", json!("Filesystem"));
+    one_of(
+        &spec["volumeMode"],
+        &["Filesystem"],
+        "the local-path driver supports Filesystem claims",
+    )?;
+    access_modes(&spec["accessModes"])?;
+    let requested = storage(
+        &spec["resources"]["requests"]["storage"],
+        "resources.requests.storage",
+    )?;
+    if let Some(old) = old {
+        for field in ["storageClassName", "volumeMode"] {
+            if old[field] != spec[field] {
+                return Err(invalid("claim storage class and volume mode are immutable"));
+            }
+        }
+        if old["accessModes"] != spec["accessModes"] {
+            return Err(invalid("claim access modes are immutable"));
+        }
+        if storage(&old["resources"]["requests"]["storage"], "storage")? > requested {
+            return Err(invalid("a claim may not shrink its storage request"));
+        }
+        if old["volumeName"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty() && old["volumeName"] != spec["volumeName"])
+        {
+            return Err(invalid("a bound claim keeps its volume"));
+        }
+    }
+    Ok(())
+}
+/// `PersistentVolume`. Only node-local volumes are implemented; the node that
+/// mounts the claim creates the directory.
+fn volume(spec: &mut Value) -> Result<()> {
+    if !spec.is_object() {
+        return Err(invalid("PersistentVolume spec is required"));
+    }
+    default(spec, "persistentVolumeReclaimPolicy", json!("Delete"));
+    default(spec, "volumeMode", json!("Filesystem"));
+    one_of(
+        &spec["persistentVolumeReclaimPolicy"],
+        &["Delete", "Retain"],
+        "unsupported PersistentVolume reclaim policy",
+    )?;
+    one_of(
+        &spec["volumeMode"],
+        &["Filesystem"],
+        "the local-path driver supports Filesystem volumes",
+    )?;
+    access_modes(&spec["accessModes"])?;
+    storage(&spec["capacity"]["storage"], "capacity.storage")?;
+    if !spec["hostPath"].is_null() {
+        return Err(invalid(
+            "hostPath volumes are not implemented; use a local volume",
+        ));
+    }
+    let path = spec["local"]["path"]
+        .as_str()
+        .filter(|p| p.starts_with('/') && p.len() <= 4096 && !p.contains('\0') && !p.contains(".."))
+        .ok_or_else(|| invalid("a local volume requires an absolute path without . or .."))?;
+    if path.trim_end_matches('/') == "/var/lib/hedronetes/local-path" {
+        return Err(invalid("the local-path driver owns its own directory"));
+    }
+    Ok(())
+}
+/// `StorageClass`. The provisioner name is published, not the driver's code:
+/// only this API's own local-path provisioner acts on a claim.
+fn storage_class(value: &mut Value) -> Result<()> {
+    // A provisioner is a qualified name like `h3s.io/local-path`.
+    let provisioner = value["provisioner"].as_str().unwrap_or("");
+    if !(1..=253).contains(&provisioner.len())
+        || provisioner.contains("..")
+        || provisioner.starts_with('/')
+        || provisioner.ends_with('/')
+        || !provisioner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    {
+        return Err(invalid("StorageClass provisioner is required"));
+    }
+    default(value, "reclaimPolicy", json!("Delete"));
+    default(value, "volumeBindingMode", json!("Immediate"));
+    one_of(
+        &value["reclaimPolicy"],
+        &["Delete", "Retain"],
+        "unsupported StorageClass reclaim policy",
+    )?;
+    one_of(
+        &value["volumeBindingMode"],
+        &["Immediate"],
+        "only immediate volume binding is implemented",
+    )?;
+    Ok(())
+}
 fn service(spec: &mut Value) -> Result<()> {
     if !spec.is_object() {
         return Err(invalid("Service spec is required"));
@@ -372,8 +502,8 @@ fn service(spec: &mut Value) -> Result<()> {
     default(spec, "type", json!("ClusterIP"));
     one_of(
         &spec["type"],
-        &["ClusterIP", "ExternalName"],
-        "currently supported Service types are ClusterIP and ExternalName",
+        &["ClusterIP", "NodePort", "ExternalName"],
+        "currently supported Service types are ClusterIP, NodePort and ExternalName",
     )?;
     if spec["type"] == "ExternalName" {
         if !spec["externalName"]
@@ -383,6 +513,22 @@ fn service(spec: &mut Value) -> Result<()> {
             return Err(invalid("externalName must be a DNS name"));
         }
         return Ok(());
+    }
+    // A node frontend forwards node traffic to any ready endpoint. Local-only
+    // external traffic needs a per-node health endpoint the proxy does not run.
+    default(spec, "externalTrafficPolicy", json!("Cluster"));
+    one_of(
+        &spec["externalTrafficPolicy"],
+        &["Cluster"],
+        "externalTrafficPolicy Local is not implemented by the native Service proxy",
+    )?;
+    if spec["healthCheckNodePort"].as_i64().is_some_and(|p| p != 0) {
+        return Err(invalid(
+            "healthCheckNodePort is not implemented by the native Service proxy",
+        ));
+    }
+    if spec["type"] == "NodePort" && spec["clusterIP"].as_str() == Some("None") {
+        return Err(invalid("a NodePort Service requires a ClusterIP"));
     }
     default(spec, "sessionAffinity", json!("None"));
     one_of(
@@ -405,6 +551,7 @@ fn service(spec: &mut Value) -> Result<()> {
         &["Cluster", "Local"],
         "invalid internalTrafficPolicy",
     )?;
+    let node_port_type = spec["type"] == "NodePort";
     let ports = spec
         .get_mut("ports")
         .and_then(Value::as_array_mut)
@@ -417,6 +564,21 @@ fn service(spec: &mut Value) -> Result<()> {
         let target = port["port"].clone();
         if port["targetPort"] == 0 {
             port["targetPort"] = Value::Null;
+        }
+        // The protobuf wire form reports an unset nodePort as zero.
+        if port["nodePort"] == 0 {
+            port["nodePort"] = Value::Null;
+        }
+        if node_port_type {
+            if !port["nodePort"].is_null()
+                && port["nodePort"]
+                    .as_i64()
+                    .is_none_or(|n| !(30000..=32767).contains(&n))
+            {
+                return Err(invalid("nodePort must be between 30000 and 32767"));
+            }
+        } else if !port["nodePort"].is_null() {
+            return Err(invalid("nodePort requires Service type NodePort"));
         }
         default(port, "targetPort", target);
         if port["targetPort"].is_number() {

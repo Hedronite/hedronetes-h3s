@@ -15,7 +15,38 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// The `--store` default: the durable single-server registry.
+    pub const DEFAULT_BACKEND: &'static str = "sqlite";
+
+    /// Open the registry selected by a `--store` value.
+    ///
+    /// `sqlite` keeps the durable registry at `path`. `memory` runs the same
+    /// store on an in-memory database: identical semantics for one server, no
+    /// file, nothing survives the process, so `path` is unused. Every other
+    /// name is an explicit error, so a typo can never silently open a durable
+    /// registry or an empty one.
+    pub async fn open_backend(backend: &str, path: impl AsRef<Path>) -> Result<Self> {
+        match backend {
+            "sqlite" => Self::open(path).await,
+            "memory" => Self::open(":memory:").await,
+            other => Err(Error::Invalid(format!(
+                "--store={other} is not implemented; supported backends are sqlite (default) and memory"
+            ))),
+        }
+    }
+
     /// Open on a blocking worker; callers provide a private, persistent data path.
+    ///
+    /// One server per registry is a *process* lock owned by the server entry
+    /// point, which owns the data directory: `crates/h3s/src/main.rs` takes
+    /// `exclusive_process_lock(<data>/db/.registry.lock)` before this call and
+    /// refuses a second server with "registry ... is locked by another h3s
+    /// server". This opener deliberately adds no lock of its own, so one
+    /// process may hold several connections over one file; their writes are
+    /// serialized by SQLite's writer lock and by the CAS in `mutate`
+    /// (`tests/contract.rs`, `competing_connections_have_one_cas_winner_...`).
+    /// A lock here would not add exclusion across processes, only a second
+    /// failure mode beside the one the server already fails closed on.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let connection = tokio::task::spawn_blocking(move || -> Result<Connection> {
@@ -413,5 +444,70 @@ impl Storage for SqliteStore {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(key: &str, value: &str) -> StoredObject {
+        StoredObject {
+            key: StoreKey::new(key).unwrap(),
+            value: value.as_bytes().to_vec(),
+            revision: 0,
+        }
+    }
+
+    /// KP-19: the store side of `--store`. `sqlite` is the durable default and
+    /// `memory` is the same store on an in-memory database; any other name is
+    /// refused here so a flag typo cannot open a durable or an empty registry.
+    #[tokio::test]
+    async fn backend_selection_is_sqlite_memory_or_an_explicit_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let durable =
+            SqliteStore::open_backend(SqliteStore::DEFAULT_BACKEND, dir.path().join("h3s.db"))
+                .await
+                .unwrap();
+        let key = StoreKey::new("/registry/configmaps/default/selected").unwrap();
+        durable
+            .create(object(key.as_str(), "durable"))
+            .await
+            .unwrap();
+        drop(durable);
+        // Durable means it is still there after the handle is gone.
+        let reopened = SqliteStore::open(dir.path().join("h3s.db")).await.unwrap();
+        assert_eq!(
+            reopened.get(&key).await.unwrap().unwrap().value,
+            b"durable".to_vec()
+        );
+        // Memory keeps the same contract without a file, and two memory stores
+        // are separate registries: nothing survives the process or the handle.
+        let memory = SqliteStore::open_backend("memory", dir.path().join("unused"))
+            .await
+            .unwrap();
+        memory.create(object(key.as_str(), "memory")).await.unwrap();
+        assert_eq!(
+            memory.get(&key).await.unwrap().unwrap().value,
+            b"memory".to_vec()
+        );
+        assert!(memory.create(object(key.as_str(), "again")).await.is_err());
+        let second = SqliteStore::open_backend("memory", dir.path().join("unused"))
+            .await
+            .unwrap();
+        assert!(second.get(&key).await.unwrap().is_none());
+        assert!(!dir.path().join("unused").exists());
+        for backend in ["etcd", "postgres", "mysql", "xline", "", "SQLite"] {
+            let error = SqliteStore::open_backend(backend, dir.path().join("h3s.db"))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{backend:?} must be refused"));
+            let message = error.to_string();
+            assert!(
+                message.contains("is not implemented")
+                    && message.contains("sqlite (default) and memory"),
+                "{backend:?}: {message}"
+            );
+        }
     }
 }

@@ -24,8 +24,11 @@ h3s-controllers = { path = "../h3s-controllers" }
 
 h3s-auth = { path = "../h3s-auth" }
 h3s-kubelet = { path = "../h3s-kubelet" }
+h3s-proxy = { path = "../h3s-proxy" }
 h3s-cri = { path = "../h3s-cri" }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 h3s-scheduler = { path = "../h3s-scheduler" }
 hostname = "0.4"
 h3s-api = { path = "../h3s-api" }

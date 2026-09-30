@@ -180,6 +180,7 @@ pub(crate) async fn watch(
     let bookmarks = q.get("allowWatchBookmarks").is_some_and(|v| v == "true");
     let api = api.clone();
     let out = async_stream::stream! {
+        let _watches = api.watching();
         let mut initial_pending = initial == Some(true);
         while let Ok(Some(event))=tokio::time::timeout_at(deadline,stream.next()).await{
             if let Some(guard) = &read_guard {

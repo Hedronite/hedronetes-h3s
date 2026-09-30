@@ -78,10 +78,14 @@ fn paths<'a>(paths: impl Iterator<Item = &'a str>) -> Result<()> {
     }
     Ok(())
 }
-/// Volume sources as the runtime profile already admitted them.
+/// Volume sources as the runtime profile already admitted them. A claim is a
+/// node-local directory, not a projection, and is mounted from its own path.
 fn sources(p: &Value) -> Result<Vec<Source<'_>>> {
     let mut out = vec![];
     for v in array(&p["spec"]["volumes"])? {
+        if !v["persistentVolumeClaim"].is_null() {
+            continue;
+        }
         let (spec, kind, field) = if v["configMap"].is_null() {
             (&v["secret"], "secrets", "secretName")
         } else {
@@ -142,7 +146,9 @@ fn payload(source: &Source<'_>, mut data: BTreeMap<String, Vec<u8>>) -> Result<P
 }
 pub async fn prepare(agent: &Agent, p: &Value, pod_root: &Path) -> Result<()> {
     let sources = sources(p)?;
-    if sources.is_empty() {
+    let claims = claim_volumes(p)?;
+    let automount = p["spec"]["automountServiceAccountToken"] == true;
+    if sources.is_empty() && claims.is_empty() && !automount {
         return Ok(());
     }
     let ns = pod::text(&p["metadata"], "namespace")?;
@@ -151,33 +157,199 @@ pub async fn prepare(agent: &Agent, p: &Value, pod_root: &Path) -> Result<()> {
     for source in &sources {
         let data =
             inputs::data(agent, ns, source.kind, source.object, source.optional, true).await?;
-        prepared.push((source.name, payload(source, data)?));
+        prepared.push((source.name.to_owned(), payload(source, data)?));
+    }
+    let account = match automount {
+        true => Some(
+            account_files(
+                agent,
+                p,
+                pod_root,
+                ns,
+                pod::text(&p["metadata"], "name")?,
+                pod::text(&p["metadata"], "uid")?,
+            )
+            .await?,
+        ),
+        false => None,
+    };
+    // The provisioner names each claim's directory; the kubelet owns it here.
+    for (_, claim, _) in &claims {
+        let path = inputs::claim(agent, ns, claim).await?;
+        if path != claim_path(ns, claim) {
+            return Err(invalid(
+                "only the local-path provisioner's own directory is mounted",
+            ));
+        }
+        real_directory_private(Path::new(&path))?;
     }
     let root = pod_root.join("volumes");
     ram_mount(&root)?;
     for (name, files) in prepared {
-        let dir = root.join(name);
+        let dir = root.join(&name);
+        real_directory(&dir, 0o755)?;
+        project(&dir, &files)?;
+    }
+    if let Some(files) = account {
+        let dir = root.join(SERVICE_ACCOUNT_VOLUME);
         real_directory(&dir, 0o755)?;
         project(&dir, &files)?;
     }
     Ok(())
 }
-pub fn mounts(c: &Value, pod_root: &Path) -> Result<Vec<Mount>> {
-    array(&c["volumeMounts"])?
+/// The ServiceAccount directory every container with automount reaches.
+const SERVICE_ACCOUNT_VOLUME: &str = "kube-api-access";
+const SERVICE_ACCOUNT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+/// Bound tokens are reminted well before the API stops accepting them.
+const TOKEN_REFRESH: std::time::Duration = std::time::Duration::from_secs(2400);
+/// The directory the API's local-path provisioner hands this claim. `prepare`
+/// checks the bound volume publishes exactly this path before mounting it.
+fn claim_path(namespace: &str, claim: &str) -> String {
+    format!("/var/lib/hedronetes/local-path/{namespace}_{claim}")
+}
+/// Node-local claim volumes: name, claim name, optional subPath.
+fn claim_volumes(p: &Value) -> Result<Vec<(String, String, Option<String>)>> {
+    let mut out = vec![];
+    for v in array(&p["spec"]["volumes"])? {
+        if v["persistentVolumeClaim"].is_null() {
+            continue;
+        }
+        let source = &v["persistentVolumeClaim"];
+        out.push((
+            pod::text(v, "name")?.to_owned(),
+            pod::text(source, "claimName")?.to_owned(),
+            source["subPath"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        ));
+    }
+    Ok(out)
+}
+fn stale(path: &Path) -> bool {
+    match fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(modified) => modified
+            .elapsed()
+            .map(|age| age >= TOKEN_REFRESH)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+/// The projected ServiceAccount files: a bound token, the cluster CA and the
+/// namespace. A live projection is reused until it needs reminting.
+async fn account_files(
+    agent: &Agent,
+    p: &Value,
+    pod_root: &Path,
+    ns: &str,
+    name: &str,
+    uid: &str,
+) -> Result<Payload> {
+    let dir = pod_root.join("volumes").join(SERVICE_ACCOUNT_VOLUME);
+    let mut files = Payload::new();
+    let mut token = None;
+    if let Some(generation) = current(&dir)? {
+        let path = generation.join("token");
+        if !stale(&path) {
+            token = Some(fs::read(path)?);
+        }
+    }
+    let token = match token {
+        Some(bytes) => bytes,
+        None => {
+            let account = p["spec"]["serviceAccountName"]
+                .as_str()
+                .unwrap_or("default");
+            inputs::token(agent, ns, account, name, uid)
+                .await?
+                .into_bytes()
+        }
+    };
+    files.insert(
+        "token".into(),
+        File {
+            bytes: token,
+            mode: 0o644,
+        },
+    );
+    files.insert(
+        "ca.crt".into(),
+        File {
+            bytes: agent.ca_pem.clone().into_bytes(),
+            mode: 0o644,
+        },
+    );
+    files.insert(
+        "namespace".into(),
+        File {
+            bytes: ns.as_bytes().to_vec(),
+            mode: 0o644,
+        },
+    );
+    Ok(files)
+}
+pub fn mounts(p: &Value, c: &Value, pod_root: &Path) -> Result<Vec<Mount>> {
+    let claims = claim_volumes(p)?;
+    let ns = pod::text(&p["metadata"], "namespace")?;
+    let mut mounts: Vec<Mount> = array(&c["volumeMounts"])?
         .iter()
         .map(|m| {
-            let host = pod_root.join("volumes").join(pod::text(m, "name")?);
+            let name = pod::text(m, "name")?;
+            let (host, readonly) = match claims.iter().find(|(volume, _, _)| volume == name) {
+                Some((_, claim, sub_path)) => {
+                    let mut host = PathBuf::from(claim_path(ns, claim));
+                    if let Some(sub_path) = sub_path {
+                        host.push(sub_path);
+                    }
+                    (host, m["readOnly"] == true)
+                }
+                None => (pod_root.join("volumes").join(name), true),
+            };
             Ok(Mount {
                 container_path: pod::text(m, "mountPath")?.into(),
                 host_path: host
                     .to_str()
                     .ok_or_else(|| invalid("non UTF-8 volume path"))?
                     .into(),
-                readonly: true,
+                readonly,
                 ..Default::default()
             })
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    // Every container reaches the bound token, CA and namespace at the
+    // documented path unless it already mounts something there.
+    if p["spec"]["automountServiceAccountToken"] == true
+        && !mounts
+            .iter()
+            .any(|m| m.container_path == SERVICE_ACCOUNT_PATH)
+    {
+        mounts.push(Mount {
+            container_path: SERVICE_ACCOUNT_PATH.into(),
+            host_path: pod_root
+                .join("volumes")
+                .join(SERVICE_ACCOUNT_VOLUME)
+                .to_str()
+                .ok_or_else(|| invalid("non UTF-8 volume path"))?
+                .into(),
+            readonly: true,
+            ..Default::default()
+        });
+    }
+    Ok(mounts)
+}
+/// A claim directory is shared by every Pod on the node: 0777 like the upstream
+/// local-path helper, and never a symlink this process did not just create.
+fn real_directory_private(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(invalid("claim directory is not a real directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o777))?;
+    Ok(())
 }
 fn real_directory(path: &Path, permissions: u32) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -448,7 +620,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn fixture() -> Value {
-        json!({"spec":{"volumes":[
+        json!({"metadata":{"name":"web","namespace":"team-a","uid":"3e17c2c0-49e2-4f2b-a917-89da3f986647"},"spec":{"volumes":[
             {"name":"config","configMap":{"name":"settings","defaultMode":292,"items":[{"key":"mode","path":"nested/mode","mode":256}]}},
             {"name":"secret","secret":{"secretName":"credentials"}}
         ],"containers":[{"volumeMounts":[{"name":"config","mountPath":"/etc/project/config"},{"name":"secret","mountPath":"/etc/project/secret","readOnly":false}]}]}})
@@ -470,7 +642,7 @@ mod tests {
     #[test]
     fn admitted_volumes_become_private_readonly_cri_mounts() {
         let p = fixture();
-        let mounts = mounts(&p["spec"]["containers"][0], Path::new("/private/uid")).unwrap();
+        let mounts = mounts(&p, &p["spec"]["containers"][0], Path::new("/private/uid")).unwrap();
         assert_eq!(mounts[0].host_path, "/private/uid/volumes/config");
         assert_eq!(mounts[0].container_path, "/etc/project/config");
         assert!(mounts.iter().all(|m| m.readonly));
@@ -483,6 +655,38 @@ mod tests {
         assert_eq!(
             (parsed[1].kind, parsed[1].object, parsed[1].mode),
             ("secrets", "credentials", 0o644)
+        );
+    }
+    /// KP-22: a bound claim mounts the node-local directory the API's
+    /// provisioner published, read-write unless the Pod says otherwise.
+    #[test]
+    fn bound_claims_mount_the_provisioned_directory_not_a_projection() {
+        let mut p = fixture();
+        p["spec"]["volumes"] = json!([
+            {"name":"data","persistentVolumeClaim":{"claimName":"web-data"}},
+            {"name":"config","configMap":{"name":"settings"}}
+        ]);
+        p["spec"]["containers"][0]["volumeMounts"] = json!([
+            {"name":"data","mountPath":"/var/data"},
+            {"name":"data","mountPath":"/var/ro","readOnly":true},
+            {"name":"config","mountPath":"/etc/project/config"}
+        ]);
+        // A claim is not a projection: it contributes no ConfigMap/Secret source.
+        assert_eq!(sources(&p).unwrap().len(), 1);
+        let cri = mounts(&p, &p["spec"]["containers"][0], Path::new("/private/uid")).unwrap();
+        assert_eq!(
+            cri[0].host_path,
+            "/var/lib/hedronetes/local-path/team-a_web-data"
+        );
+        assert!(!cri[0].readonly);
+        assert!(cri[1].readonly);
+        assert_eq!(cri[2].host_path, "/private/uid/volumes/config");
+        // The claim's subPath is part of the host path.
+        p["spec"]["volumes"][0]["persistentVolumeClaim"]["subPath"] = json!("nested");
+        assert_eq!(
+            mounts(&p, &p["spec"]["containers"][0], Path::new("/private/uid")).unwrap()[0]
+                .host_path,
+            "/var/lib/hedronetes/local-path/team-a_web-data/nested"
         );
     }
     #[test]

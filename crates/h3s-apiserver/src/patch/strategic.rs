@@ -66,9 +66,12 @@ pub(super) fn apply(resource: Resource, original: Value, patch: Value) -> Result
     if !patch.is_object() {
         return Err(invalid("strategic patch must be an object"));
     }
-    let root = schemas()["roots"][resource.kind]
-        .as_str()
-        .expect("every served resource has a generated schema");
+    // The pinned upstream schema covers the kinds the strategic path was
+    // generated for. A claim kind reaches this path only if a client asks for
+    // strategic merge explicitly; answer that instead of merging blindly.
+    let root = schemas()["roots"][resource.kind].as_str().ok_or_else(|| {
+        invalid("strategic merge is not implemented for this resource; use a JSON merge or a full update")
+    })?;
     merge(
         original,
         &patch,
@@ -399,7 +402,17 @@ mod tests {
             }
         }
         for resource in RESOURCES {
-            assert!(schemas()["roots"][resource.kind].is_string());
+            // Kinds served without a pinned upstream strategic schema are
+            // reachable through JSON merge and PUT only; a strategic patch for
+            // them is an explicit error, not a guess.
+            if matches!(
+                resource.kind,
+                "PersistentVolume" | "PersistentVolumeClaim" | "StorageClass"
+            ) {
+                assert!(schemas()["roots"][resource.kind].is_null());
+            } else {
+                assert!(schemas()["roots"][resource.kind].is_string());
+            }
         }
     }
 

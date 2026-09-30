@@ -6,7 +6,6 @@
 //! Nothing here evaluates Nickel: this crate consumes generated Rust only.
 mod common;
 use common::Server;
-use h3s_api::pod_profile::PodRuntimeProfile;
 use serde_json::{json, Value};
 
 const SUPPORTED_POD: &str = include_str!("../../../examples/supported-pod.yaml");
@@ -69,28 +68,19 @@ async fn supported_pod_example_admits_unchanged() {
     assert_eq!(sc["seccompProfile"]["type"], "RuntimeDefault");
 }
 
-/// The 0.9.1 overlay still says no token projection: until TokenRequest and
-/// bearer authentication land (GOAL-V010 spine 3), `automountServiceAccountToken: true`
-/// is a runtime refusal, in every namespace, and nothing is persisted.
+/// A Pod that asks for the bound token is admitted in every namespace: the
+/// API issues the token and the kubelet mounts it at the documented path.
 #[tokio::test]
-async fn automount_true_is_still_a_422_runtime_refusal() {
+async fn automount_true_admits_the_bound_token_path() {
     let dir = tempfile::tempdir().unwrap();
     let s = Server::start(dir.path()).await;
     s.namespace("team-a").await;
     for ns in ["team-a", "kube-system"] {
         let mut pod = supported_pod("token");
         set(&mut pod, "/spec/automountServiceAccountToken", json!(true));
-        let (code, failure) = create(&s, ns, pod).await;
-        assert_eq!(code, 422, "{ns}: {failure}");
-        assert_eq!(failure["reason"], "Invalid", "{failure}");
-        let message = failure["message"].as_str().unwrap();
-        assert!(
-            message.contains("restricted-v1")
-                && message.contains(PodRuntimeProfile::CONTRACT_SET)
-                && message.contains("token projection"),
-            "{ns}: {message}"
-        );
-        absent(&s, ns, "token").await;
+        let (code, created) = create(&s, ns, pod).await;
+        assert_eq!(code, 201, "{ns}: {created}");
+        assert_eq!(created["spec"]["automountServiceAccountToken"], true);
     }
 }
 
@@ -107,12 +97,6 @@ async fn release_gaps_are_runtime_422_not_policy_403() {
             "/spec/enableServiceLinks",
             json!(true),
             "service environment",
-        ),
-        (
-            "pvc",
-            "/spec/volumes",
-            json!([{"name":"data","persistentVolumeClaim":{"claimName":"data"}}]),
-            "volume source",
         ),
         (
             "init",

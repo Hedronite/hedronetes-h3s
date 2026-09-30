@@ -21,6 +21,11 @@ pub(crate) async fn execute(
             "resource or subresource is not implemented",
         )
     })?;
+    // `kubectl create token` and the kubelet's projected mount both reach this
+    // subresource; the API is the only issuer and verifier of bound tokens.
+    if target.subresource == Some("token") {
+        return crate::token::create(api, user, &target, &query, request).await;
+    }
     let watch = query.get("watch").is_some_and(|v| v == "true" || v == "1");
     let verb = verb(request.method().as_str(), &target, watch)?;
     let selection = Selection::parse(
