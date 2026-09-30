@@ -65,6 +65,15 @@ Inspired by the k3s single-binary shape; reimplemented in Rust without embedding
 
 For CI, labs, and small clusters: run `h3s server` and `h3s agent` as a self-contained binary pair (see [Binary](#binary)). This path exercises the full control plane. Production teams on EKS/GKE typically start by joining an existing cluster instead.
 
+## CI boundaries
+
+GitHub CI on `ubuntu-latest` runs exactly two jobs (no Sonobuoy, no conformance, no cargo-deny):
+
+- **`build`** on the current Rust toolchain: `cargo fmt --all -- --check`, a locked `cargo clippy --workspace --all-targets --all-features -- -D warnings`, a locked `cargo build --workspace`, and a locked `cargo test --workspace`.
+- **`minimum-rust`**: the same locked `cargo test --workspace` on Rust **1.88** (the workspace minimum).
+
+CI proves the Rust workspace compiles, lints, and unit/integration-tests that run in-process. It does **not** run the working cluster topology: two-node server+agent with containerd, Flannel, and the nftables proxy is the **documented lab** — see [`server-agent`](./docs/server-agent.md), [`supervisor-tunnel`](./docs/supervisor-tunnel.md), and [`service-networking`](./docs/service-networking.md); the harness lives in `integration/tower/`. A change can pass CI and still need a lab check at release time.
+
 ## Docs
 
 - Full product specification: [`SPEC.md`](./SPEC.md).
