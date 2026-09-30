@@ -38,3 +38,12 @@ jobs:
           key: msrv-1.88
       - name: Test minimum Rust
         run: cargo +1.88.0 test --workspace --locked
+
+  dependency-advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Check RustSec advisories
+        run: cargo deny check advisories
