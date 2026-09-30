@@ -44,6 +44,14 @@ struct Frontend {
     node_port: bool,
     backends: BTreeSet<Backend>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceStatus {
+    pub namespace: String,
+    pub name: String,
+    pub port: u16,
+    pub backends: usize,
+}
+
 #[derive(Debug)]
 pub struct Plan {
     pod_cidrs: BTreeSet<Ipv4Net>,
@@ -51,6 +59,8 @@ pub struct Plan {
     /// Why a frontend was published without endpoints: a dropped EndpointSlice
     /// port is never silent.
     warnings: Vec<String>,
+    /// What each Service port resolved to, for the proxy's own state file.
+    status: Vec<ServiceStatus>,
 }
 fn values(v: &Value) -> impl Iterator<Item = &Value> {
     v.as_array().into_iter().flatten()
@@ -178,6 +188,7 @@ pub fn plan(
     let mut tuples = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut warnings = Vec::new();
+    let mut status = Vec::new();
     let mut total_backends = 0;
     for service in services {
         let spec = &service["spec"];
@@ -217,14 +228,17 @@ pub fn plan(
                 {
                     continue;
                 }
+                let slice_ports = values(&slice["ports"]).count();
                 for sp in values(&slice["ports"]) {
                     let slice_name = sp["name"].as_str().unwrap_or("");
-                    // A single-port Service may name its port on the Service, on
-                    // the slice, or on neither: the pairing is unambiguous. A
-                    // multi-port Service must name it on both.
+                    // A slice that publishes one port pairs with a Service that
+                    // has one port by protocol alone: the names are decoration
+                    // on either side. A multi-port pair must name its ports, or
+                    // the endpoint cannot be attributed.
+                    let unambiguous = service_ports <= 1 && slice_ports <= 1;
                     let named = !port_name.is_empty() && !slice_name.is_empty();
-                    if (named && slice_name != port_name)
-                        || (!named && service_ports > 1)
+                    if (!unambiguous && named && slice_name != port_name)
+                        || (!unambiguous && !named)
                         || sp["protocol"].as_str().unwrap_or("TCP") != protocol.nft().to_uppercase()
                         || sp["port"].is_null()
                     {
@@ -278,6 +292,12 @@ pub fn plan(
             if !ids.insert(id.clone()) {
                 return Err(Error::Invalid("duplicate Service chain identity"));
             }
+            status.push(ServiceStatus {
+                namespace: ns.to_owned(),
+                name: name.to_owned(),
+                port: service_port,
+                backends: backends.len(),
+            });
             if backends.is_empty() {
                 warnings.push(format!(
                     "{ns}/{name}: port {service_port}/{} has no ready endpoint",
@@ -338,6 +358,7 @@ pub fn plan(
         pod_cidrs,
         services: frontends,
         warnings,
+        status,
     })
 }
 impl Frontend {
@@ -352,6 +373,10 @@ impl Plan {
     /// Why this plan published a frontend without endpoints.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+    /// What each Service port resolved to in this snapshot.
+    pub fn status(&self) -> &[ServiceStatus] {
+        &self.status
     }
     pub fn render(&self, owner: &str) -> Result<String> {
         if owner.len() != 64 || !owner.bytes().all(|b| b.is_ascii_hexdigit()) {

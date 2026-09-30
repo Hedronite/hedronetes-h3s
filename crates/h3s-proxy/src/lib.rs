@@ -81,6 +81,28 @@ pub async fn run(
                                     for warning in plan.warnings() {
                                         eprintln!("h3s Service proxy: {warning}");
                                     }
+                                    // The proxy's own view, for a failure that
+                                    // nftables alone cannot explain.
+                                    let _ = h3s_certs::private::write(
+                                        &config.state_dir.join("status.json"),
+                                        &serde_json::to_vec_pretty(&serde_json::json!({
+                                            "services_seen": snapshot.services.items.len(),
+                                            "slices_seen": snapshot.slices.items.len(),
+                                            "nodes_seen": snapshot.nodes.items.len(),
+                                            "service_revision": snapshot.services.revision,
+                                            "slice_revision": snapshot.slices.revision,
+                                            "resolved": plan.status().iter().map(|s| serde_json::json!({
+                                                "namespace": s.namespace,
+                                                "name": s.name,
+                                                "port": s.port,
+                                                "backends": s.backends,
+                                            })).collect::<Vec<_>>(),
+                                            "warnings": plan.warnings(),
+                                            "resolved_ports": plan.status().len(),
+                                        }))
+                                        .expect("status JSON"),
+                                        true,
+                                    );
                                     APPLIES.fetch_add(1, Ordering::Relaxed);
                                     h3s_certs::private::write(
                                         &config.state_dir.join("rules.nft"),
