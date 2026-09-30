@@ -67,10 +67,11 @@ For CI, labs, and small clusters: run `h3s server` and `h3s agent` as a self-con
 
 ## CI boundaries
 
-GitHub CI on `ubuntu-latest` runs exactly two jobs (no Sonobuoy, no conformance, no cargo-deny):
+GitHub CI on `ubuntu-latest` runs three jobs (no Sonobuoy, no conformance suites):
 
 - **`build`** on the current Rust toolchain: `cargo fmt --all -- --check`, a locked `cargo clippy --workspace --all-targets --all-features -- -D warnings`, a locked `cargo build --workspace`, and a locked `cargo test --workspace`.
 - **`minimum-rust`**: the same locked `cargo test --workspace` on Rust **1.88** (the workspace minimum).
+- **`dependency-advisories`**: `cargo deny check advisories` against RustSec using cargo-deny.
 
 CI proves the Rust workspace compiles, lints, and unit/integration-tests that run in-process. It does **not** run the working cluster topology: two-node server+agent with containerd, Flannel, and the nftables proxy is the **documented lab** — see [`server-agent`](./docs/server-agent.md), [`supervisor-tunnel`](./docs/supervisor-tunnel.md), and [`service-networking`](./docs/service-networking.md); the harness lives in `integration/tower/`. A change can pass CI and still need a lab check at release time.
 
