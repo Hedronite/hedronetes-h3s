@@ -41,7 +41,6 @@ struct Frontend {
     port: u16,
     protocol: Protocol,
     local: bool,
-    node_port: bool,
     backends: BTreeSet<Backend>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,7 +309,6 @@ pub fn plan(
                 port: service_port,
                 protocol: protocol.clone(),
                 local,
-                node_port: false,
                 backends: backends.clone(),
             });
             // A NodePort Service adds one frontend on this node's own address
@@ -343,7 +341,6 @@ pub fn plan(
                         port: node_port,
                         protocol: protocol.clone(),
                         local: false,
-                        node_port: true,
                         backends: backends.clone(),
                     });
                 }
@@ -360,14 +357,6 @@ pub fn plan(
         warnings,
         status,
     })
-}
-impl Frontend {
-    /// Only constructs this proxy already installs in production: a node
-    /// frontend matches one of the addresses the Node reports, one frontend
-    /// per address.
-    fn match_on(&self) -> String {
-        format!("ip daddr {}", self.ip)
-    }
 }
 impl Plan {
     /// Why this plan published a frontend without endpoints.
@@ -389,10 +378,10 @@ impl Plan {
         writeln!(out, " chain services {{").unwrap();
         for s in &self.services {
             if !s.backends.is_empty() {
+                let address = format!("ip daddr {}", s.ip);
                 writeln!(
                     out,
-                    "  {} {} dport {} counter jump {}",
-                    s.match_on(),
+                    "  {address} {} dport {} counter jump {}",
                     s.protocol.nft(),
                     s.port,
                     s.id
@@ -409,10 +398,10 @@ impl Plan {
             .unwrap();
             for s in &self.services {
                 if s.backends.is_empty() {
+                    let address = format!("ip daddr {}", s.ip);
                     writeln!(
                         out,
-                        "  {} {} dport {} counter {}",
-                        s.match_on(),
+                        "  {address} {} dport {} counter {}",
                         s.protocol.nft(),
                         s.port,
                         if s.local { "drop" } else { "reject" }
@@ -439,13 +428,9 @@ impl Plan {
             if s.backends.is_empty() {
                 continue;
             }
-            let address = if s.node_port {
-                String::new()
-            } else {
-                format!(" ip daddr {}", s.ip)
-            };
             let original = format!(
-                "ct status dnat ct original{address} meta l4proto {} ct original proto-dst {}",
+                "ct status dnat ct original ip daddr {} meta l4proto {} ct original proto-dst {}",
+                s.ip,
                 s.protocol.nft(),
                 s.port
             );
@@ -455,11 +440,6 @@ impl Plan {
             )
             .unwrap();
             for b in &s.backends {
-                // A node frontend is only reachable from off-node clients and
-                // from local Pods, which the rule above already covers.
-                if s.node_port {
-                    continue;
-                }
                 writeln!(
                     out,
                     "  {original} ip saddr {} ip daddr {} {} dport {} counter masquerade",
@@ -667,8 +647,14 @@ mod tests {
         assert!(rules.contains("ip daddr 192.168.104.3 tcp dport 30080 counter jump svc_"));
         assert!(rules.contains("ip daddr 192.168.104.4 tcp dport 30080 counter jump svc_"));
         assert!(rules.contains("dnat to 10.42.0.2:8080"));
-        assert!(rules
-            .contains("ct status dnat ct original meta l4proto tcp ct original proto-dst 30080"));
+        assert!(rules.contains(
+            "ct status dnat ct original ip daddr 192.168.104.3 meta l4proto tcp ct original proto-dst 30080"
+        ));
+        // `ct original` is a direction qualifier and must be followed by a key.
+        // `ct original meta l4proto` is not nft syntax: a ruleset containing it
+        // is rejected whole, so the previous table stays installed and a node
+        // port silently keeps its empty-endpoint reject.
+        assert!(!rules.contains("ct original meta"), "{rules}");
         assert!(!rules.contains("fib "), "unverified nft construct: {rules}");
         // No reported InternalIP means no node frontend can be programmed.
         assert!(

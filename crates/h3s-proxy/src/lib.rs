@@ -75,6 +75,11 @@ pub async fn run(
                 .and_then(|plan| plan.render(&config.owner).map(|rules| (plan, rules)))
                 {
                     Ok((plan, rules)) => {
+                        h3s_certs::private::write(
+                            &config.state_dir.join("attempted.nft"),
+                            rules.as_bytes(),
+                            true,
+                        )?;
                         match backend.reconcile(&rules).await {
                             Ok(changed) => {
                                 if changed {
