@@ -64,9 +64,13 @@ pub(crate) fn decode(raw: &[u8], content_type: &str) -> Result<Value> {
                         "apps/v1" => "apps",
                         "discovery.k8s.io/v1" => "discovery",
                         "coordination.k8s.io/v1" => "coordination",
+                        // `kubectl create token` speaks its request type in
+                        // protobuf; it is a request object, not a registry kind.
+                        "authentication.k8s.io/v1" => "authentication",
                         _ => return Err(bad("unsupported protobuf API version")),
                     };
                     if !(kind == "Binding" && version == "v1")
+                        && !(kind == "TokenRequest" && version == "authentication.k8s.io/v1")
                         && !super::resources::RESOURCES
                             .iter()
                             .any(|r| r.kind == kind && r.api_version() == version)
@@ -224,5 +228,38 @@ mod tests {
         assert_eq!(v["kind"], "Namespace");
         assert!(decode(&wire[4..], "application/vnd.kubernetes.protobuf").is_err());
         assert!(decode(b"payload", "text/plain").is_err());
+    }
+    /// `kubectl create token` speaks its request type in protobuf. It is a
+    /// request object, not a registry kind, so it needs its own envelope case.
+    #[test]
+    fn protobuf_token_requests_decode() {
+        let mut spec = DynamicMessage::new(
+            POOL.get_message_by_name("k8s.io.api.authentication.v1.TokenRequestSpec")
+                .unwrap(),
+        );
+        spec.set_field_by_name("expirationSeconds", Pb::I64(600));
+        let mut request = DynamicMessage::new(
+            POOL.get_message_by_name("k8s.io.api.authentication.v1.TokenRequest")
+                .unwrap(),
+        );
+        request.set_field_by_name("spec", Pb::Message(spec));
+        let mut meta = DynamicMessage::new(
+            POOL.get_message_by_name("k8s.io.apimachinery.pkg.runtime.TypeMeta")
+                .unwrap(),
+        );
+        meta.set_field_by_name("apiVersion", Pb::String("authentication.k8s.io/v1".into()));
+        meta.set_field_by_name("kind", Pb::String("TokenRequest".into()));
+        let mut envelope = DynamicMessage::new(
+            POOL.get_message_by_name("k8s.io.apimachinery.pkg.runtime.Unknown")
+                .unwrap(),
+        );
+        envelope.set_field_by_name("typeMeta", Pb::Message(meta));
+        envelope.set_field_by_name("raw", Pb::Bytes(request.encode_to_vec().into()));
+        let mut wire = b"k8s\0".to_vec();
+        wire.extend(envelope.encode_to_vec());
+        let value = decode(&wire, "application/vnd.kubernetes.protobuf").unwrap();
+        assert_eq!(value["kind"], "TokenRequest");
+        assert_eq!(value["apiVersion"], "authentication.k8s.io/v1");
+        assert_eq!(value["spec"]["expirationSeconds"], 600);
     }
 }

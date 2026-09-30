@@ -134,20 +134,106 @@ fn claims(spec: &Value) -> Result<Vec<String>> {
     }
     Ok(names)
 }
-/// The spec the generated overlay reads: claim volumes and their mounts are
+/// The projected service-account volume the API injects: exactly the bound
+/// token, the cluster CA and the namespace, and nothing else.
+fn projection(volume: &Value) -> Result<bool> {
+    if volume["projected"].is_null() {
+        return Ok(false);
+    }
+    let projected = &volume["projected"];
+    fields(projected, &["defaultMode", "sources"])?;
+    if !projected["defaultMode"].is_null()
+        && projected["defaultMode"].as_u64().is_none_or(|m| m > 0o777)
+    {
+        return Err(Unsupported(
+            "projected volume mode must be within 0000-0777",
+        ));
+    }
+    let (mut token, mut ca, mut namespace) = (0, 0, 0);
+    let sources = projected["sources"]
+        .as_array()
+        .filter(|s| s.len() == 3)
+        .ok_or(Unsupported(
+        "a projected volume must carry the service-account token, the cluster CA and the namespace",
+    ))?;
+    for source in sources {
+        if !source["serviceAccountToken"].is_null() {
+            let source = &source["serviceAccountToken"];
+            fields(source, &["audience", "expirationSeconds", "path"])?;
+            if text(source, "path")? != "token" {
+                return Err(Unsupported("the bound token projects at `token`"));
+            }
+            if source["expirationSeconds"]
+                .as_i64()
+                .is_some_and(|v| !(600..=86_400).contains(&v))
+            {
+                return Err(Unsupported("token lifetime must be 600..86400 seconds"));
+            }
+            if source["audience"]
+                .as_str()
+                .is_some_and(|a| a.is_empty() || a.len() > 256)
+            {
+                return Err(Unsupported("invalid token audience"));
+            }
+            token += 1;
+        } else if !source["configMap"].is_null() {
+            let source = &source["configMap"];
+            fields(source, &["name", "items", "optional"])?;
+            if text(source, "name")? != "kube-root-ca.crt" || source["optional"] == true {
+                return Err(Unsupported("the cluster CA projects from kube-root-ca.crt"));
+            }
+            ca += 1;
+        } else if !source["downwardAPI"].is_null() {
+            let source = &source["downwardAPI"];
+            fields(source, &["items"])?;
+            let items = source["items"]
+                .as_array()
+                .filter(|i| i.len() == 1)
+                .ok_or(Unsupported("only the namespace is projected"))?;
+            fields(&items[0], &["path", "fieldRef"])?;
+            if text(&items[0], "path")? != "namespace"
+                || items[0]["fieldRef"]["fieldPath"] != "metadata.namespace"
+            {
+                return Err(Unsupported("only the namespace is projected"));
+            }
+            namespace += 1;
+        } else {
+            return Err(Unsupported("unsupported projected volume source"));
+        }
+    }
+    if (token, ca, namespace) != (1, 1, 1) {
+        return Err(Unsupported(
+            "a projected volume must carry the service-account token, the cluster CA and the namespace",
+        ));
+    }
+    Ok(true)
+}
+/// The spec the generated overlay reads: volumes and mounts it predates are
 /// removed, and an explicit bound-token request becomes the profile default.
 fn extension(spec: &Value) -> Result<Option<Value>> {
     let claims = claims(spec)?;
     let automount = spec["automountServiceAccountToken"] == true;
-    if claims.is_empty() && !automount {
+    let mut projected = Vec::new();
+    for volume in spec["volumes"].as_array().into_iter().flatten() {
+        if projection(volume)? {
+            let name = volume["name"]
+                .as_str()
+                .filter(|n| safe_component(n))
+                .ok_or(Unsupported("invalid projected volume name"))?
+                .to_owned();
+            projected.push(name);
+        }
+    }
+    if claims.is_empty() && projected.is_empty() && !automount {
         return Ok(None);
     }
+    let stripped: Vec<String> = claims.into_iter().chain(projected).collect();
     let mut probe = spec.clone();
     probe["automountServiceAccountToken"] = json!(false);
-    if !claims.is_empty() {
+    if !stripped.is_empty() {
         if let Some(volumes) = probe["volumes"].as_array_mut() {
             volumes.retain(|v| {
-                !claims
+                !stripped
                     .iter()
                     .any(|n| v["name"].as_str() == Some(n.as_str()))
             });
@@ -156,7 +242,7 @@ fn extension(spec: &Value) -> Result<Option<Value>> {
             for container in probe[field].as_array_mut().into_iter().flatten() {
                 if let Some(mounts) = container["volumeMounts"].as_array_mut() {
                     mounts.retain(|m| {
-                        !claims
+                        !stripped
                             .iter()
                             .any(|n| m["name"].as_str() == Some(n.as_str()))
                     });

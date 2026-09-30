@@ -196,12 +196,30 @@ async fn bound_tokens_are_issued_accepted_and_rejected() {
             .as_u16(),
         401
     );
-    // A Pod that asks for the token is admitted: the kubelet mounts it.
+    // A Pod that asks for the token carries the upstream projection: the bound
+    // token, the cluster CA and the namespace, mounted at the documented path.
     let mut pod = pod("projected");
     pod["spec"]["automountServiceAccountToken"] = json!(true);
     let (code, created) = create(&s, pod).await;
     assert_eq!(code, 201, "{created}");
     assert_eq!(created["spec"]["automountServiceAccountToken"], true);
+    let volume = &created["spec"]["volumes"][0];
+    let name = volume["name"].as_str().unwrap();
+    assert!(name.starts_with("kube-api-access-"), "{volume}");
+    let sources = volume["projected"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 3, "{volume}");
+    assert_eq!(sources[0]["serviceAccountToken"]["path"], "token");
+    assert_eq!(sources[0]["serviceAccountToken"]["expirationSeconds"], 3607);
+    assert_eq!(sources[1]["configMap"]["name"], "kube-root-ca.crt");
+    assert_eq!(sources[2]["downwardAPI"]["items"][0]["path"], "namespace");
+    assert_eq!(
+        created["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
+        "/var/run/secrets/kubernetes.io/serviceaccount"
+    );
+    assert_eq!(
+        created["spec"]["containers"][0]["volumeMounts"][0]["name"],
+        name
+    );
 }
 
 #[tokio::test]
