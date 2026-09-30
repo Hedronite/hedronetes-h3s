@@ -69,7 +69,7 @@ For CI, labs, and small clusters: run `h3s server` and `h3s agent` as a self-con
 
 - Full product specification: [`SPEC.md`](./SPEC.md).
 - Security: how to report vulnerabilities — [`SECURITY.md`](./SECURITY.md).
-- Design and checkpoint notes under [`docs/`](./docs): [`server-agent`](./docs/server-agent.md) · [`workload-api`](./docs/workload-api.md) · [`workload-controllers`](./docs/workload-controllers.md) · [`scheduler`](./docs/scheduler.md) · [`pod-runtime`](./docs/pod-runtime.md) · [`admission`](./docs/admission.md) · [`serviceaccounts`](./docs/serviceaccounts.md) · [`service-networking`](./docs/service-networking.md) · [`service-endpoints`](./docs/service-endpoints.md) · [`node-access`](./docs/node-access.md) · [`node-cidr-allocation`](./docs/node-cidr-allocation.md) · [`strategic-patches`](./docs/strategic-patches.md) · [`configuration-volumes`](./docs/configuration-volumes.md) · [`security-foundation`](./docs/security-foundation.md) · [`supervisor-tunnel`](./docs/supervisor-tunnel.md) · [`worker-bootstrap`](./docs/worker-bootstrap.md) · [`cri-runtime`](./docs/cri-runtime.md) · [`flannel-cni`](./docs/flannel-cni.md) · [`flannel-packaging`](./docs/flannel-packaging.md) · [`api-foundation`](./docs/api-foundation.md). Documents titled “checkpoint” are historical build-phase records; see [`SPEC.md`](./SPEC.md) §16 for the current roadmap.
+- Design and checkpoint notes under [`docs/`](./docs): [`addons`](./docs/addons.md) · [`server-agent`](./docs/server-agent.md) · [`workload-api`](./docs/workload-api.md) · [`workload-controllers`](./docs/workload-controllers.md) · [`scheduler`](./docs/scheduler.md) · [`pod-runtime`](./docs/pod-runtime.md) · [`admission`](./docs/admission.md) · [`serviceaccounts`](./docs/serviceaccounts.md) · [`service-networking`](./docs/service-networking.md) · [`service-endpoints`](./docs/service-endpoints.md) · [`node-access`](./docs/node-access.md) · [`node-cidr-allocation`](./docs/node-cidr-allocation.md) · [`strategic-patches`](./docs/strategic-patches.md) · [`configuration-volumes`](./docs/configuration-volumes.md) · [`security-foundation`](./docs/security-foundation.md) · [`supervisor-tunnel`](./docs/supervisor-tunnel.md) · [`worker-bootstrap`](./docs/worker-bootstrap.md) · [`cri-runtime`](./docs/cri-runtime.md) · [`flannel-cni`](./docs/flannel-cni.md) · [`flannel-packaging`](./docs/flannel-packaging.md) · [`api-foundation`](./docs/api-foundation.md). Documents titled “checkpoint” are historical build-phase records; see [`SPEC.md`](./SPEC.md) §16 for the current roadmap.
 
 ## Implemented API
 
@@ -93,7 +93,7 @@ Stock `kubectl` and Helm work against these kinds only (Kubernetes **v1.34** wir
 | rbac.authorization.k8s.io | v1 | ClusterRole | cluster |
 | rbac.authorization.k8s.io | v1 | ClusterRoleBinding | cluster |
 
-StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are in development.
+StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy are **not shipped**; they are in development.
 
 ## Supported workloads
 
@@ -118,7 +118,15 @@ kubectl apply -f examples/supported-pod.yaml
 | ClusterIP | yes | IPv4 TCP/UDP nftables proxy |
 | Headless (`clusterIP: None`) | yes | no virtual IP (in development) |
 | ExternalName | yes | no dataplane rules |
-| NodePort / LoadBalancer | in development | — |
+| NodePort / LoadBalancer | not shipped (in development) | — |
+
+## Add-ons
+
+- Flavor follows k3s: optional cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
+- **Shipped today:** `h3s server --disable-agent` runs the control plane + datastore + supervisor without the embedded local agent.
+- **CoreDNS:** in development as the packaged add-on; **not shipped**. The cluster PKI already issues the `system:coredns` client identity, so CoreDNS can be run manually against a lab cluster, but no add-on manager applies it today.
+- **`--disable=`** (k3s-style, comma-separated add-on names): in development; **not shipped** until there are add-ons to disable.
+- **Flannel:** an explicit host daemon (systemd unit via the Nix flake), not a h3s add-on and never a DaemonSet. Run it per node yourself. See [`docs/addons.md`](./docs/addons.md).
 
 ## Platform services (Facet + HedronDB)
 

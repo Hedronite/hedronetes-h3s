@@ -820,6 +820,13 @@ system rather than a collection of parts.
   task restarts, and an in-flight `kubectl` call is not cancelled.
 - The server takes an exclusive lock on the SQLite registry; a second
   server against the same data directory fails closed.
+- **No HA flags ship in v0.10.0.** There is no etcd, no Postgres, and no
+  `--cluster-init` today; nothing of that surface exists to advertise. If
+  HA backends arrive later, their flags **MUST** be hidden or fail with
+  an explicit error until a real backend exists (M2, §16 v1.0.0 scope).
+- Cluster add-ons (CoreDNS) and `--disable=` follow the shape documented
+  in [`docs/addons.md`](./docs/addons.md): k3s-shaped by contract, marked
+  not shipped until the add-on manager is in the binary.
 - NodePort, LoadBalancer, local-path PVC, CoreDNS, and the
   sqlite → etcd upgrade path (`--cluster-init`) remain **owed from the old
   “v0.2” label**; they land in later v0.10.x/v0.11.x releases as the code
