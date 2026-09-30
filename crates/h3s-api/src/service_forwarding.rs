@@ -46,9 +46,7 @@ impl ServiceForwarding {
             || spec["externalTrafficPolicy"]
                 .as_str()
                 .is_some_and(|p| p != "Cluster")
-            || spec["healthCheckNodePort"]
-                .as_i64()
-                .is_some_and(|p| p != 0)
+            || spec["healthCheckNodePort"].as_i64().is_some_and(|p| p != 0)
         {
             return Self::UnsupportedPolicy;
         }

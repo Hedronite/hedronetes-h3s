@@ -465,11 +465,15 @@ mod tests {
     #[tokio::test]
     async fn backend_selection_is_sqlite_memory_or_an_explicit_refusal() {
         let dir = tempfile::tempdir().unwrap();
-        let durable = SqliteStore::open_backend(SqliteStore::DEFAULT_BACKEND, dir.path().join("h3s.db"))
+        let durable =
+            SqliteStore::open_backend(SqliteStore::DEFAULT_BACKEND, dir.path().join("h3s.db"))
+                .await
+                .unwrap();
+        let key = StoreKey::new("/registry/configmaps/default/selected").unwrap();
+        durable
+            .create(object(key.as_str(), "durable"))
             .await
             .unwrap();
-        let key = StoreKey::new("/registry/configmaps/default/selected").unwrap();
-        durable.create(object(key.as_str(), "durable")).await.unwrap();
         drop(durable);
         // Durable means it is still there after the handle is gone.
         let reopened = SqliteStore::open(dir.path().join("h3s.db")).await.unwrap();
@@ -487,10 +491,7 @@ mod tests {
             memory.get(&key).await.unwrap().unwrap().value,
             b"memory".to_vec()
         );
-        assert!(memory
-            .create(object(key.as_str(), "again"))
-            .await
-            .is_err());
+        assert!(memory.create(object(key.as_str(), "again")).await.is_err());
         let second = SqliteStore::open_backend("memory", dir.path().join("unused"))
             .await
             .unwrap();

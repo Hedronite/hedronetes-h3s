@@ -193,9 +193,7 @@ async fn helm_release_put_without_resource_version_updates_latest() {
         },
         "data":{"value":"forged"}
     });
-    let (code, refused) = s
-        .json(s.admin(), "PUT", plain_path, claims.clone())
-        .await;
+    let (code, refused) = s.json(s.admin(), "PUT", plain_path, claims.clone()).await;
     assert_eq!(code, 400, "{refused}");
     let mut observed = claims;
     observed["metadata"]["resourceVersion"] = plain["metadata"]["resourceVersion"].clone();

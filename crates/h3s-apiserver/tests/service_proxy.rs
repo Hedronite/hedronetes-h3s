@@ -99,9 +99,7 @@ async fn node_port_services_are_admitted_allocated_and_immutable() {
     let dir = tempfile::tempdir().unwrap();
     let s = Server::start(dir.path()).await;
     let base = "/api/v1/namespaces/default/services";
-    let create = |name: &str, spec: Value| {
-        json!({"apiVersion":"v1","kind":"Service","metadata":{"name":name},"spec":spec})
-    };
+    let create = |name: &str, spec: Value| json!({"apiVersion":"v1","kind":"Service","metadata":{"name":name},"spec":spec});
     // An explicit node port inside the published range is kept.
     let (code, stated) = s
         .json(
@@ -124,7 +122,10 @@ async fn node_port_services_are_admitted_allocated_and_immutable() {
             s.admin(),
             "POST",
             base,
-            create("allocated", json!({"type":"NodePort","ports":[{"name":"http","port":80}]})),
+            create(
+                "allocated",
+                json!({"type":"NodePort","ports":[{"name":"http","port":80}]}),
+            ),
         )
         .await;
     assert_eq!(code, 201, "{allocated}");
