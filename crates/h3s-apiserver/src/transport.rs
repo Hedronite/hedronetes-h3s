@@ -70,14 +70,22 @@ pub async fn serve(
                 let acceptor=acceptor.clone();let router=router.clone();
                 let context=ConnectionContext {shutdown:lifecycle.clone(),_permit:Arc::new(permit)};
                 tasks.spawn(async move {
-                    let stream=match tokio::time::timeout(Duration::from_secs(10),acceptor.accept(stream)).await {
+                    // A Pod reaching the API crosses a bridge and a NAT before the
+                    // first byte arrives, so a handshake that is merely slow must
+                    // not be aborted while the client still waits: the client only
+                    // sees the socket close, which it reports as a failed TLS
+                    // record. The deadline is long enough for a path that stalls
+                    // and recovers, and every outcome is logged with how far the
+                    // connection got.
+                    let started=std::time::Instant::now();
+                    let stream=match tokio::time::timeout(Duration::from_secs(30),acceptor.accept(stream)).await {
                         Ok(Ok(stream))=>stream,
                         Ok(Err(error))=>{
-                            eprintln!("h3s apiserver: TLS handshake with {peer_address} failed: {error}");
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} failed after {}ms: {error}",started.elapsed().as_millis());
                             return;
                         }
                         Err(_)=>{
-                            eprintln!("h3s apiserver: TLS handshake with {peer_address} timed out");
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} timed out after {}ms",started.elapsed().as_millis());
                             return;
                         }
                     };
