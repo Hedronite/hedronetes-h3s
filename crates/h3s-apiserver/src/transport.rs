@@ -27,10 +27,16 @@ pub(crate) struct ConnectionContext {
 /// Bound accepted connections and TLS handshake time; shutdown drops all peers.
 pub async fn serve(
     listener: TcpListener,
-    tls: rustls::ServerConfig,
+    mut tls: rustls::ServerConfig,
     router: Router,
     shutdown: impl Future<Output = ()>,
 ) -> io::Result<()> {
+    // Bound this server's TLS records. A handshake carries the whole
+    // certificate chain in one flight, and over an overlay a record larger
+    // than the Pod's path MTU is dropped without an ICMP that the tunnel
+    // carries back, so the client never completes the handshake and this side
+    // sees only a timeout. One kilobyte fits every plausible path here.
+    tls.max_fragment_size = Some(1024);
     let lifecycle = CancellationToken::new();
     let _cancel_on_drop = lifecycle.clone().drop_guard();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
