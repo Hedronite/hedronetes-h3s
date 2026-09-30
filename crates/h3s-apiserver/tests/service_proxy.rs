@@ -1,6 +1,6 @@
 mod common;
 use common::Server;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[tokio::test]
 async fn node_discovery_is_read_only_and_survives_api_restart() {
@@ -92,6 +92,109 @@ async fn node_discovery_is_read_only_and_survives_api_restart() {
             );
             s = s.restart(dir.path()).await;
         }
+    }
+}
+#[tokio::test]
+async fn node_port_services_are_admitted_allocated_and_immutable() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    let base = "/api/v1/namespaces/default/services";
+    let create = |name: &str, spec: Value| {
+        json!({"apiVersion":"v1","kind":"Service","metadata":{"name":name},"spec":spec})
+    };
+    // An explicit node port inside the published range is kept.
+    let (code, stated) = s
+        .json(
+            s.admin(),
+            "POST",
+            base,
+            create(
+                "stated",
+                json!({"type":"NodePort","ports":[{"name":"http","port":80,"nodePort":30080}]}),
+            ),
+        )
+        .await;
+    assert_eq!(code, 201, "{stated}");
+    assert_eq!(stated["spec"]["externalTrafficPolicy"], "Cluster");
+    assert_eq!(stated["spec"]["ports"][0]["nodePort"], 30080);
+    assert_ne!(stated["spec"]["clusterIP"], json!("None"));
+    // An unset node port is allocated in range and never repeats.
+    let (code, allocated) = s
+        .json(
+            s.admin(),
+            "POST",
+            base,
+            create("allocated", json!({"type":"NodePort","ports":[{"name":"http","port":80}]})),
+        )
+        .await;
+    assert_eq!(code, 201, "{allocated}");
+    let node_port = allocated["spec"]["ports"][0]["nodePort"].as_i64().unwrap();
+    assert!((30000..=32767).contains(&node_port), "{node_port}");
+    assert_ne!(node_port, 30080);
+    // An applied Service round-trips its allocation, and an update that omits
+    // the node port keeps the stored one instead of reallocating.
+    let mut applied = allocated.clone();
+    applied["metadata"]["resourceVersion"] = allocated["metadata"]["resourceVersion"].clone();
+    let (code, kept) = s
+        .json(s.admin(), "PUT", &format!("{base}/allocated"), applied)
+        .await;
+    assert_eq!(code, 200, "{kept}");
+    assert_eq!(kept["spec"]["ports"][0]["nodePort"], node_port);
+    let mut omitted = kept.clone();
+    omitted["spec"]["ports"] = json!([{"name":"http","port":80}]);
+    let (code, kept) = s
+        .json(s.admin(), "PUT", &format!("{base}/allocated"), omitted)
+        .await;
+    assert_eq!(code, 200, "{kept}");
+    assert_eq!(kept["spec"]["ports"][0]["nodePort"], node_port);
+    // A different node port on an existing Service is immutable.
+    let mut changed = kept.clone();
+    changed["spec"]["ports"] = json!([{"name":"http","port":80,"nodePort":30099}]);
+    assert_eq!(
+        s.json(s.admin(), "PUT", &format!("{base}/allocated"), changed)
+            .await
+            .0,
+        422
+    );
+    for (name, spec) in [
+        (
+            "range",
+            json!({"type":"NodePort","ports":[{"name":"http","port":80,"nodePort":29999}]}),
+        ),
+        (
+            "taken",
+            json!({"type":"NodePort","ports":[{"name":"http","port":80,"nodePort":30080}]}),
+        ),
+        (
+            "loadbalancer",
+            json!({"type":"LoadBalancer","ports":[{"name":"http","port":80}]}),
+        ),
+        (
+            "local",
+            json!({"type":"NodePort","externalTrafficPolicy":"Local","ports":[{"name":"http","port":80}]}),
+        ),
+        (
+            "health",
+            json!({"type":"NodePort","healthCheckNodePort":30090,"ports":[{"name":"http","port":80}]}),
+        ),
+        (
+            "headless",
+            json!({"type":"NodePort","clusterIP":"None","ports":[{"name":"http","port":80}]}),
+        ),
+        (
+            "cluster",
+            json!({"ports":[{"name":"http","port":80,"nodePort":30080}]}),
+        ),
+    ] {
+        let (code, refusal) = s.json(s.admin(), "POST", base, create(name, spec)).await;
+        assert_eq!(code, 422, "{name}: {refusal}");
+        assert_eq!(
+            s.json(s.admin(), "GET", &format!("{base}/{name}"), json!({}))
+                .await
+                .0,
+            404,
+            "{name} must not be persisted"
+        );
     }
 }
 #[tokio::test]

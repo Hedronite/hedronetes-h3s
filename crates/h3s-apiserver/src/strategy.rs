@@ -21,22 +21,18 @@ fn one_of(value: &Value, choices: &[&str], field: &str) -> Result<()> {
     Ok(())
 }
 
-/// Helm release drivers rebuild ConfigMaps and Secrets without resourceVersion.
+/// Helm's release driver rebuilds its storage objects with a blind PUT, so
+/// those objects must not need a resourceVersion. Only what Helm itself stores
+/// may skip the precondition: Helm's release-storage name, its ownership label,
+/// and for Secrets its release type. A ConfigMap or Secret that merely claims
+/// the label stays an ordinary object under CAS.
 pub(crate) fn helm_owned(value: &Value, kind: &str) -> bool {
-    if kind == "Secret" && value.get("type").and_then(Value::as_str) == Some("helm.sh/release.v1") {
-        return true;
-    }
-    if value["metadata"]["labels"]["owner"].as_str() == Some("helm") {
-        return true;
-    }
-    if kind == "Secret" {
-        if let Some(name) = value["metadata"]["name"].as_str() {
-            if name.starts_with("sh.helm.release.v1.") {
-                return true;
-            }
-        }
-    }
-    false
+    let Some(name) = value["metadata"]["name"].as_str() else {
+        return false;
+    };
+    name.starts_with("sh.helm.release.v1.")
+        && value["metadata"]["labels"]["owner"].as_str() == Some("helm")
+        && (kind == "ConfigMap" || value["type"].as_str() == Some("helm.sh/release.v1"))
 }
 
 /// Copy `key` from `from`, leaving it absent rather than null when unset so
@@ -379,8 +375,8 @@ fn service(spec: &mut Value) -> Result<()> {
     default(spec, "type", json!("ClusterIP"));
     one_of(
         &spec["type"],
-        &["ClusterIP", "ExternalName"],
-        "currently supported Service types are ClusterIP and ExternalName",
+        &["ClusterIP", "NodePort", "ExternalName"],
+        "currently supported Service types are ClusterIP, NodePort and ExternalName",
     )?;
     if spec["type"] == "ExternalName" {
         if !spec["externalName"]
@@ -390,6 +386,22 @@ fn service(spec: &mut Value) -> Result<()> {
             return Err(invalid("externalName must be a DNS name"));
         }
         return Ok(());
+    }
+    // A node frontend forwards node traffic to any ready endpoint. Local-only
+    // external traffic needs a per-node health endpoint the proxy does not run.
+    default(spec, "externalTrafficPolicy", json!("Cluster"));
+    one_of(
+        &spec["externalTrafficPolicy"],
+        &["Cluster"],
+        "externalTrafficPolicy Local is not implemented by the native Service proxy",
+    )?;
+    if spec["healthCheckNodePort"].as_i64().is_some_and(|p| p != 0) {
+        return Err(invalid(
+            "healthCheckNodePort is not implemented by the native Service proxy",
+        ));
+    }
+    if spec["type"] == "NodePort" && spec["clusterIP"].as_str() == Some("None") {
+        return Err(invalid("a NodePort Service requires a ClusterIP"));
     }
     default(spec, "sessionAffinity", json!("None"));
     one_of(
@@ -412,6 +424,7 @@ fn service(spec: &mut Value) -> Result<()> {
         &["Cluster", "Local"],
         "invalid internalTrafficPolicy",
     )?;
+    let node_port_type = spec["type"] == "NodePort";
     let ports = spec
         .get_mut("ports")
         .and_then(Value::as_array_mut)
@@ -424,6 +437,21 @@ fn service(spec: &mut Value) -> Result<()> {
         let target = port["port"].clone();
         if port["targetPort"] == 0 {
             port["targetPort"] = Value::Null;
+        }
+        // The protobuf wire form reports an unset nodePort as zero.
+        if port["nodePort"] == 0 {
+            port["nodePort"] = Value::Null;
+        }
+        if node_port_type {
+            if !port["nodePort"].is_null()
+                && port["nodePort"]
+                    .as_i64()
+                    .is_none_or(|n| !(30000..=32767).contains(&n))
+            {
+                return Err(invalid("nodePort must be between 30000 and 32767"));
+            }
+        } else if !port["nodePort"].is_null() {
+            return Err(invalid("nodePort requires Service type NodePort"));
         }
         default(port, "targetPort", target);
         if port["targetPort"].is_number() {

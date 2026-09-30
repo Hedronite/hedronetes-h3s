@@ -147,13 +147,15 @@ async fn helm_release_put_without_resource_version_updates_latest() {
     let s = Server::start(dir.path()).await;
     s.namespace("team-a").await;
 
-    let created = s.configmap("release", "pending-install").await;
-    let path = "/api/v1/namespaces/team-a/configmaps/release";
+    let created = s
+        .configmap("sh.helm.release.v1.release.v1", "pending-install")
+        .await;
+    let path = "/api/v1/namespaces/team-a/configmaps/sh.helm.release.v1.release.v1";
     let mut helm_update = json!({
         "apiVersion":"v1",
         "kind":"ConfigMap",
         "metadata":{
-            "name":"release",
+            "name":"sh.helm.release.v1.release.v1",
             "namespace":"team-a",
             "labels":{"owner":"helm","status":"deployed","name":"release","version":"1"}
         },
@@ -175,6 +177,31 @@ async fn helm_release_put_without_resource_version_updates_latest() {
     assert_eq!(upgraded["data"]["value"], "upgraded");
     assert_eq!(upgraded["metadata"]["labels"]["version"], "2");
     assert_eq!(s.json(s.admin(), "PUT", path, created).await.0, 409);
+
+    // A ConfigMap that only claims Helm's ownership label is an ordinary
+    // object: it must still name the observed revision, and it takes a
+    // different name than Helm's own release storage.
+    let plain = s.configmap("release", "plain").await;
+    let plain_path = "/api/v1/namespaces/team-a/configmaps/release";
+    let claims = json!({
+        "apiVersion":"v1",
+        "kind":"ConfigMap",
+        "metadata":{
+            "name":"release",
+            "namespace":"team-a",
+            "labels":{"owner":"helm","status":"deployed"}
+        },
+        "data":{"value":"forged"}
+    });
+    let (code, refused) = s
+        .json(s.admin(), "PUT", plain_path, claims.clone())
+        .await;
+    assert_eq!(code, 400, "{refused}");
+    let mut observed = claims;
+    observed["metadata"]["resourceVersion"] = plain["metadata"]["resourceVersion"].clone();
+    let (code, updated) = s.json(s.admin(), "PUT", plain_path, observed).await;
+    assert_eq!(code, 200, "{updated}");
+    assert_eq!(updated["data"]["value"], "forged");
 
     let secret_name = "sh.helm.release.v1.release.v1";
     let secret_path = format!("/api/v1/namespaces/team-a/secrets/{secret_name}");

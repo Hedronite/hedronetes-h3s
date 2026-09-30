@@ -119,6 +119,43 @@ async fn controller_creates_repairs_and_preserves_namespace_identity_resources()
     assert_eq!(s.json(s.admin(), "GET", sa, json!({})).await.0, 404);
 }
 #[tokio::test]
+async fn bound_token_requests_are_an_explicit_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    s.namespace("team-a").await;
+    // `kubectl create token` reaches this subresource; the API issues no bound
+    // tokens, so it answers with the documented refusal instead of a 404.
+    let (code, refusal) = s
+        .json(
+            s.admin(),
+            "POST",
+            "/api/v1/namespaces/team-a/serviceaccounts/default/token",
+            json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","spec":{"audiences":["https://kubernetes.default.svc"],"expirationSeconds":3600}}),
+        )
+        .await;
+    assert_eq!(code, 501, "{refusal}");
+    assert_eq!(refusal["reason"], "NotImplemented", "{refusal}");
+    assert!(
+        refusal["message"]
+            .as_str()
+            .unwrap()
+            .contains("bound ServiceAccount tokens are not implemented"),
+        "{refusal}"
+    );
+    // A Pod cannot opt into the same projection instead.
+    let mut pod = pod("projected");
+    pod["spec"]["automountServiceAccountToken"] = json!(true);
+    let (code, refused) = create(&s, pod).await;
+    assert_eq!(code, 422, "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("token projection"),
+        "{refused}"
+    );
+}
+#[tokio::test]
 async fn controller_credentials_have_only_required_api_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = Server::start_with_controllers(dir.path()).await;

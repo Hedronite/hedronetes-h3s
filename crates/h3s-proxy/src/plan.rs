@@ -60,6 +60,13 @@ fn port(v: &Value) -> Result<u16> {
         .map(|n| n as u16)
         .ok_or(Error::Invalid("invalid proxy port"))
 }
+/// An allocated node port, in the published range.
+fn node_port(v: &Value) -> Result<u16> {
+    v.as_u64()
+        .filter(|n| (30000..=32767).contains(n))
+        .map(|n| n as u16)
+        .ok_or(Error::Invalid("invalid Service node port"))
+}
 fn ip(v: &Value) -> Result<Ipv4Addr> {
     let ip = v
         .as_str()
@@ -106,6 +113,7 @@ pub fn plan(
     let mut pod_cidrs = BTreeSet::<Ipv4Net>::new();
     let service_range = "10.43.0.0/16".parse::<Ipv4Net>().unwrap();
     let mut own = false;
+    let mut node_ip: Option<Ipv4Addr> = None;
     for node in nodes {
         if let Some(cidr) = node["spec"]["podCIDR"].as_str().filter(|s| !s.is_empty()) {
             let subnet = cidr
@@ -126,6 +134,12 @@ pub fn plan(
             if node["metadata"]["name"] == node_name {
                 own = true;
             }
+        }
+        if node["metadata"]["name"] == node_name {
+            node_ip = values(&node["status"]["addresses"])
+                .find(|address| address["type"] == "InternalIP")
+                .map(|address| ip(&address["address"]))
+                .transpose()?;
         }
     }
     let mut previous: Option<Ipv4Net> = None;
@@ -241,10 +255,40 @@ pub fn plan(
                 id,
                 ip: cluster_ip,
                 port: service_port,
-                protocol,
+                protocol: protocol.clone(),
                 local,
-                backends,
+                backends: backends.clone(),
             });
+            // A NodePort Service adds one frontend on this node's own address
+            // for every node port it published. Node traffic reaches any ready
+            // endpoint; external sources are masqueraded like upstream.
+            if spec["type"] == "NodePort" {
+                let node_port = node_port(&p["nodePort"])?;
+                let node_ip = node_ip.ok_or(Error::Invalid(
+                    "local node has no reported InternalIP for NodePort Services",
+                ))?;
+                if !tuples.insert((node_ip, node_port, protocol.clone())) {
+                    return Err(Error::Invalid("duplicate Service frontend"));
+                }
+                let id = format!(
+                    "svc_{}",
+                    digest(&format!(
+                        "{ns}/{name}/{uid}/{node_ip}/{node_port}/{}/nodeport",
+                        protocol.nft()
+                    ))
+                );
+                if !ids.insert(id.clone()) {
+                    return Err(Error::Invalid("duplicate Service chain identity"));
+                }
+                frontends.push(Frontend {
+                    id,
+                    ip: node_ip,
+                    port: node_port,
+                    protocol,
+                    local: false,
+                    backends,
+                });
+            }
             if frontends.len() > 4096 {
                 return Err(Error::Invalid("too many Service ports"));
             }
@@ -406,6 +450,9 @@ mod tests {
     fn service() -> Value {
         json!({"metadata":{"name":"web","namespace":"test","uid":"new-service"},"spec":{"clusterIP":"10.43.0.10","ports":[{"name":"http","port":80,"protocol":"TCP"},{"name":"dns","port":53,"protocol":"UDP"}]}})
     }
+    fn node_port_service() -> Value {
+        json!({"metadata":{"name":"web-np","namespace":"test","uid":"new-nodeport"},"spec":{"type":"NodePort","clusterIP":"10.43.0.11","externalTrafficPolicy":"Cluster","ports":[{"name":"http","port":80,"nodePort":30080,"protocol":"TCP"}]}})
+    }
     fn slice() -> Value {
         json!({"metadata":{"namespace":"test","labels":{"kubernetes.io/service-name":"web"},"ownerReferences":[{"kind":"Service","name":"web","uid":"new-service"}]},"addressType":"IPv4","ports":[{"name":"http","port":8080,"protocol":"TCP"},{"name":"dns","port":1053,"protocol":"UDP"}],"endpoints":[{"addresses":["10.42.0.2"],"nodeName":"server","conditions":{"ready":true}},{"addresses":["10.42.2.2"],"nodeName":"worker"}]})
     }
@@ -506,6 +553,51 @@ mod tests {
                 .unwrap()
         );
         assert!(p.render("\";flush ruleset;").is_err());
+    }
+    #[test]
+    fn node_port_frontends_use_the_local_address_and_require_it() {
+        let mut slice = slice();
+        slice["metadata"]["labels"]["kubernetes.io/service-name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["name"] = json!("web-np");
+        slice["metadata"]["ownerReferences"][0]["uid"] = json!("new-nodeport");
+        slice["ports"] = json!([{"name":"http","port":8080,"protocol":"TCP"}]);
+        let mut addressed = nodes();
+        addressed[0]["status"] = json!({"addresses":[{"type":"Hostname","address":"server"},{"type":"InternalIP","address":"192.168.104.3"}]});
+        addressed[1]["status"] =
+            json!({"addresses":[{"type":"InternalIP","address":"192.168.104.4"}]});
+        let p = plan(
+            &[node_port_service()],
+            std::slice::from_ref(&slice),
+            &addressed,
+            "server",
+        )
+        .unwrap();
+        // The ClusterIP frontend and the node frontend for the same port.
+        assert_eq!(p.services.len(), 2);
+        let rules = p.render(&"a".repeat(64)).unwrap();
+        assert!(rules.contains("ip daddr 10.43.0.11 tcp dport 80 counter jump svc_"));
+        assert!(rules.contains("ip daddr 192.168.104.3 tcp dport 30080 counter jump svc_"));
+        assert!(rules.contains("dnat to 10.42.0.2:8080"));
+        assert!(rules.contains(
+            "ct original ip daddr 192.168.104.3 meta l4proto tcp ct original proto-dst 30080"
+        ));
+        // No reported InternalIP means no node frontend can be programmed.
+        assert!(
+            plan(&[node_port_service()], &[slice.clone()], &nodes(), "server").is_err(),
+            "a node without an InternalIP cannot publish node ports"
+        );
+        // Two Services cannot own one node port.
+        let mut second = node_port_service();
+        second["metadata"]["name"] = json!("other-np");
+        second["metadata"]["uid"] = json!("other-nodeport");
+        second["spec"]["clusterIP"] = json!("10.43.0.12");
+        assert!(plan(
+            &[node_port_service(), second],
+            &[slice],
+            &addressed,
+            "server"
+        )
+        .is_err());
     }
     #[test]
     fn invalid_addresses_policy_and_incomplete_topology_do_not_produce_rules() {

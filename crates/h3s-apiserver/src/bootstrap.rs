@@ -166,6 +166,39 @@ pub async fn join(api: &Api, request: Request<Body>) -> Result<Response> {
         .into_response())
 }
 
+/// The cluster CA an agent needs before it can verify any other call. This is
+/// public material: it is the trust anchor every client already holds, and
+/// fetching it is the first step of enrollment, so the request carries no
+/// credential. Everything an agent does with it still requires the join token.
+pub async fn cacerts(api: &Api, request: Request<Body>) -> Result<Response> {
+    let state = api
+        .bootstrap
+        .as_ref()
+        .ok_or_else(|| Failure::new(404, "NotFound", "native enrollment is not configured"))?;
+    if request.method() != "GET" {
+        return Err(Failure::new(
+            405,
+            "MethodNotAllowed",
+            "the cluster CA requires GET",
+        ));
+    }
+    if request.uri().query().is_some() {
+        return Err(Failure::new(
+            400,
+            "BadRequest",
+            "the cluster CA does not accept query parameters",
+        ));
+    }
+    Ok((
+        [
+            ("content-type", "application/x-pem-file"),
+            ("cache-control", "no-store"),
+        ],
+        state.pki.ca_pem().to_owned(),
+    )
+        .into_response())
+}
+
 /// Only an existing native node may request its own dedicated serving identity.
 pub async fn serving(api: &Api, user: &h3s_auth::User, request: Request<Body>) -> Result<Response> {
     let node = user

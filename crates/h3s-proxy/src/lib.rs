@@ -7,7 +7,7 @@ use reqwest::{Client, Url};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -15,6 +15,12 @@ use std::{
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 pub const TABLE: &str = "h3s_proxy";
 pub const MAX_RULESET: usize = 2 * 1024 * 1024;
+static APPLIES: AtomicU64 = AtomicU64::new(0);
+/// Rulesets this process has successfully installed, for `/metrics`. The
+/// exporter lives outside this crate.
+pub fn applies() -> u64 {
+    APPLIES.load(Ordering::Relaxed)
+}
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("service proxy: {0}")]
@@ -77,6 +83,7 @@ pub async fn run(
                         match backend.reconcile(&rules).await {
                             Ok(changed) => {
                                 if changed {
+                                    APPLIES.fetch_add(1, Ordering::Relaxed);
                                     h3s_certs::private::write(
                                         &config.state_dir.join("rules.nft"),
                                         rules.as_bytes(),

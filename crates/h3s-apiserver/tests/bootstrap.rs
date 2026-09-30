@@ -40,6 +40,60 @@ fn config(s: &Server, root: &Path, token: bool) -> Config {
 }
 
 #[tokio::test]
+async fn cluster_ca_is_served_without_credentials_before_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Server::start(dir.path()).await;
+    let anonymous = || s.pki.client_config(None).unwrap();
+    // No client certificate and no Authorization header: this body is what an
+    // agent needs before it can verify anything else.
+    let response = s
+        .raw(anonymous(), "GET", "/v1-h3s/server/cacerts", json!({}), &[])
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-pem-file")
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), s.pki.ca_pem().as_bytes());
+    // A credential is neither required nor rejected on this route.
+    let response = s
+        .raw(
+            anonymous(),
+            "GET",
+            "/v1-h3s/server/cacerts",
+            json!({}),
+            &[("authorization", "Bearer not-the-join-token")],
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    for (method, path) in [
+        ("POST", "/v1-h3s/server/cacerts"),
+        ("GET", "/v1-h3s/server/cacerts?x=1"),
+    ] {
+        let response = s.raw(anonymous(), method, path, json!({}), &[]).await;
+        assert!(
+            matches!(response.status().as_u16(), 400 | 405),
+            "{method} {path}"
+        );
+    }
+    // Enrollment itself is unchanged: a wrong token is still 401.
+    let response = s
+        .raw(
+            anonymous(),
+            "POST",
+            "/v1-h3s/join",
+            json!({}),
+            &[("authorization", "Bearer wrong")],
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 401);
+}
+
+#[tokio::test]
 async fn bootstrap_verifies_token_csr_and_overrides_requested_privileges() {
     let root = tempfile::tempdir().unwrap();
     let s = Server::start(root.path()).await;
