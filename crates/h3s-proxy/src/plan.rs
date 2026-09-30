@@ -116,7 +116,7 @@ pub fn plan(
     let mut pod_cidrs = BTreeSet::<Ipv4Net>::new();
     let service_range = "10.43.0.0/16".parse::<Ipv4Net>().unwrap();
     let mut own = false;
-    let mut node_ip: Option<Ipv4Addr> = None;
+    let mut node_ips: Vec<Ipv4Addr> = Vec::new();
     for node in nodes {
         if let Some(cidr) = node["spec"]["podCIDR"].as_str().filter(|s| !s.is_empty()) {
             let subnet = cidr
@@ -139,10 +139,15 @@ pub fn plan(
             }
         }
         if node["metadata"]["name"] == node_name {
-            node_ip = values(&node["status"]["addresses"])
-                .find(|address| address["type"] == "InternalIP")
-                .map(|address| ip(&address["address"]))
-                .transpose()?;
+            for address in values(&node["status"]["addresses"]) {
+                if !matches!(address["type"].as_str(), Some("InternalIP" | "ExternalIP")) {
+                    continue;
+                }
+                let reported = ip(&address["address"])?;
+                if !node_ips.contains(&reported) {
+                    node_ips.push(reported);
+                }
+            }
         }
     }
     let mut previous: Option<Ipv4Net> = None;
@@ -268,31 +273,35 @@ pub fn plan(
             // endpoint; external sources are masqueraded like upstream.
             if spec["type"] == "NodePort" {
                 let node_port = node_port(&p["nodePort"])?;
-                let node_ip = node_ip.ok_or(Error::Invalid(
-                    "local node has no reported InternalIP for NodePort Services",
-                ))?;
-                if !tuples.insert((node_ip, node_port, protocol.clone())) {
-                    return Err(Error::Invalid("duplicate Service frontend"));
+                if node_ips.is_empty() {
+                    return Err(Error::Invalid(
+                        "local node reports no address for NodePort Services",
+                    ));
                 }
-                let id = format!(
-                    "svc_{}",
-                    digest(&format!(
-                        "{ns}/{name}/{uid}/{node_ip}/{node_port}/{}/nodeport",
-                        protocol.nft()
-                    ))
-                );
-                if !ids.insert(id.clone()) {
-                    return Err(Error::Invalid("duplicate Service chain identity"));
+                for node_ip in &node_ips {
+                    if !tuples.insert((*node_ip, node_port, protocol.clone())) {
+                        return Err(Error::Invalid("duplicate Service frontend"));
+                    }
+                    let id = format!(
+                        "svc_{}",
+                        digest(&format!(
+                            "{ns}/{name}/{uid}/{node_ip}/{node_port}/{}/nodeport",
+                            protocol.nft()
+                        ))
+                    );
+                    if !ids.insert(id.clone()) {
+                        return Err(Error::Invalid("duplicate Service chain identity"));
+                    }
+                    frontends.push(Frontend {
+                        id,
+                        ip: *node_ip,
+                        port: node_port,
+                        protocol: protocol.clone(),
+                        local: false,
+                        node_port: true,
+                        backends: backends.clone(),
+                    });
                 }
-                frontends.push(Frontend {
-                    id,
-                    ip: node_ip,
-                    port: node_port,
-                    protocol,
-                    local: false,
-                    node_port: true,
-                    backends,
-                });
             }
             if frontends.len() > 4096 {
                 return Err(Error::Invalid("too many Service ports"));
@@ -306,14 +315,11 @@ pub fn plan(
     })
 }
 impl Frontend {
-    /// `fib daddr type local` is kube-proxy's node-port match: the rule fires
-    /// for traffic to any address this node owns, not only the reported one.
+    /// Only constructs this proxy already installs in production: a node
+    /// frontend matches one of the addresses the Node reports, one frontend
+    /// per address.
     fn match_on(&self) -> String {
-        if self.node_port {
-            "fib daddr type local".to_owned()
-        } else {
-            format!("ip daddr {}", self.ip)
-        }
+        format!("ip daddr {}", self.ip)
     }
 }
 impl Plan {
@@ -587,7 +593,7 @@ mod tests {
         slice["metadata"]["ownerReferences"][0]["uid"] = json!("new-nodeport");
         slice["ports"] = json!([{"name":"http","port":8080,"protocol":"TCP"}]);
         let mut addressed = nodes();
-        addressed[0]["status"] = json!({"addresses":[{"type":"Hostname","address":"server"},{"type":"InternalIP","address":"192.168.104.3"}]});
+        addressed[0]["status"] = json!({"addresses":[{"type":"Hostname","address":"server"},{"type":"InternalIP","address":"192.168.104.3"},{"type":"ExternalIP","address":"192.168.104.4"}]});
         addressed[1]["status"] =
             json!({"addresses":[{"type":"InternalIP","address":"192.168.104.4"}]});
         let p = plan(
@@ -597,17 +603,18 @@ mod tests {
             "server",
         )
         .unwrap();
-        // The ClusterIP frontend and the node frontend for the same port.
-        assert_eq!(p.services.len(), 2);
+        // The ClusterIP frontend and one node frontend per reported address.
+        assert_eq!(p.services.len(), 3);
         let rules = p.render(&"a".repeat(64)).unwrap();
         assert!(rules.contains("ip daddr 10.43.0.11 tcp dport 80 counter jump svc_"));
-        // The node port answers on every address of the node, as kube-proxy's
-        // `--dst-type LOCAL` does, not only on the reported InternalIP.
-        assert!(rules.contains("fib daddr type local tcp dport 30080 counter jump svc_"));
-        assert!(!rules.contains("ip daddr 192.168.104.3 tcp dport 30080"));
+        // The node port answers on every address the Node reports, using only
+        // constructs this proxy already installs.
+        assert!(rules.contains("ip daddr 192.168.104.3 tcp dport 30080 counter jump svc_"));
+        assert!(rules.contains("ip daddr 192.168.104.4 tcp dport 30080 counter jump svc_"));
         assert!(rules.contains("dnat to 10.42.0.2:8080"));
         assert!(rules
             .contains("ct status dnat ct original meta l4proto tcp ct original proto-dst 30080"));
+        assert!(!rules.contains("fib "), "unverified nft construct: {rules}");
         // No reported InternalIP means no node frontend can be programmed.
         assert!(
             plan(&[node_port_service()], &[slice.clone()], &nodes(), "server").is_err(),
