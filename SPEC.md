@@ -789,7 +789,7 @@ second versioning axis.
 | --- | --- | --- |
 | **v0.9.0** (shipped, tag) | **M1 subset** — the first release that runs a cluster: two hosts, restricted non-root Pods, ClusterIP | “v0.1 — kind, but native” plus the single-server parts of “v0.2 — k3s-shaped” that already existed at that tag |
 | **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
-| **v0.10.0** (in development) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods run end to end | the remainder of “v0.2 — k3s-shaped” that holds without HA |
+| **v0.10.0** (shipped, tag) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods, bound tokens, ClusterIP and NodePort, local-path PVC | the remainder of “v0.2 — k3s-shaped” that holds without HA |
 | **v1.0.0** (reserved) | **M2** — etcd/Postgres HA, security MUSTs, official conformance | “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
 ### v0.9.0 — M1 subset (shipped)
@@ -809,7 +809,7 @@ second versioning axis.
   and kubelet, and a supervisor that restarts failed node tasks. Claims in
   the README match this tree; where they did not, the docs moved.
 
-### v0.10.0 — k3s-shaped single-server (this line)
+### v0.10.0 — k3s-shaped single-server (shipped)
 
 Goal: the released two-host cluster behaves as one honest k3s-shaped
 system rather than a collection of parts.
@@ -825,12 +825,10 @@ system rather than a collection of parts.
   HA backends arrive later, their flags **MUST** be hidden or fail with
   an explicit error until a real backend exists (M2, §16 v1.0.0 scope).
 - Cluster add-ons (CoreDNS) and `--disable=` follow the shape documented
-  in [`docs/addons.md`](./docs/addons.md): k3s-shaped by contract, marked
-  not shipped until the add-on manager is in the binary.
-- NodePort, LoadBalancer, local-path PVC, CoreDNS, and the
-  sqlite → etcd upgrade path (`--cluster-init`) remain **owed from the old
-  “v0.2” label**; they land in later v0.10.x/v0.11.x releases as the code
-  ships, and are not to be advertised before that.
+  in [`docs/addons.md`](./docs/addons.md).
+- NodePort, local-path PVC, the documented CoreDNS addon, and bound
+  ServiceAccount tokens ship in this tag. LoadBalancer and the
+  sqlite → etcd upgrade path (`--cluster-init`) stay reserved for v1.0.0.
 
 **DoD:** one SQLite server plus agents, `kubectl apply` of the documented
 default Pod reaches Running behind a ClusterIP Service, and killing
@@ -842,8 +840,8 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening: NodeRestriction, bound ServiceAccount tokens, Server-Side
-  Apply, secrets encryption.
+- Hardening still reserved here: NodeRestriction, Server-Side Apply,
+  secrets encryption. Bound ServiceAccount tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
 - musl static release binaries, amd64 + arm64; documented backup /

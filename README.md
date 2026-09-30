@@ -1,6 +1,6 @@
 # Hedronetes (h3s)
 
-> **Status:** In production use as daily-driver / dogfood agentic node beside K8s/k3s (v0.9.1). Hardening: further stress testing before broad production recommend; durable HA + conformance targeted for v1.0.0. Not a toy reference.
+> **Status:** In production use as daily-driver / dogfood agentic node beside K8s/k3s (v0.10.0). Hardening: further stress testing before broad production recommend; durable HA + conformance targeted for v1.0.0. Not a toy reference.
 
 
 <p align="center">
@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-C9A227?style=flat&colorA=111111" alt="Apache-2.0" /></a>
-  <a href="https://github.com/VirtualMachinist/hedronetes-h3s/releases/tag/v0.9.1"><img src="https://img.shields.io/badge/Release-v0.9.1-C9A227?style=flat&colorA=111111" alt="Release v0.9.1" /></a>
+  <a href="https://github.com/Hedronite/hedronetes-h3s/releases/tag/v0.10.0"><img src="https://img.shields.io/badge/Release-v0.10.0-C9A227?style=flat&colorA=111111" alt="Release v0.10.0" /></a>
   <a href="https://github.com/VirtualMachinist/hedronetes-h3s/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/VirtualMachinist/hedronetes-h3s/ci.yml?style=flat&label=CI&colorA=111111&color=C9A227" alt="CI" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-0042DB?style=flat&colorA=111111&logo=rust&logoColor=C9A227" alt="Rust" /></a>
 </p>
@@ -24,7 +24,7 @@ Teams on EKS, GKE, AKS, or any stock kube API keep their control plane. They joi
 
 > Kubernetes-compatible. Rust-native. Built to sit **beside** your existing control plane — including k3s — not to replace it.
 
-Status: **0.9.1** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd64 / arm64
+Status: **0.10.0** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd64 / arm64
 
 ## What this is
 
@@ -163,13 +163,13 @@ cargo run -p h3s -- agent --help
 ## In Development
 
 - Full Kubernetes conformance and durable high availability multi-control-plane (see [Status](#status)).
-- StatefulSet, Job, DaemonSet, PVC, and NetworkPolicy in core binary.
+- StatefulSet, Job, DaemonSet, and NetworkPolicy in core binary.
 - Ingress, mesh, and GitOps.
 - Seamless Kubernetes integration.
 
 ## Status
 
-**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). This product works; further stress testing is needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
+**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). **v0.10.0** is the k3s-shaped single-server release: default Pods, bound ServiceAccount tokens, ClusterIP and NodePort, local-path PVC, and an API that survives controller death. One SQLite server. Not HA. Further stress testing is still needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
 
 A multi-node h3s cluster — native `server` + separate `agent` — runs workloads with stock `kubectl` and Helm. Proven on Colima VMs running NixOS, Debian, and Fedora.
 
