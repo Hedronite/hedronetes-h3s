@@ -132,15 +132,23 @@ fn template_metadata(template: &Value) -> Result<Value, Error> {
         json!({"labels":template["metadata"]["labels"],"annotations":template["metadata"]["annotations"]}),
     )
 }
-fn condition(
-    old: &Value,
-    kind: &str,
-    status: &str,
-    reason: &str,
-    message: &str,
+struct ConditionSpec<'a> {
+    kind: &'a str,
+    status: &'a str,
+    reason: &'a str,
+    message: &'a str,
     update: bool,
     deployment: bool,
-) -> Value {
+}
+fn condition(old: &Value, spec: ConditionSpec<'_>) -> Value {
+    let ConditionSpec {
+        kind,
+        status,
+        reason,
+        message,
+        update,
+        deployment,
+    } = spec;
     let previous = values(&old["conditions"]).find(|c| c["type"] == kind);
     let time = timestamp();
     let transition = previous

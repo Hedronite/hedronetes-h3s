@@ -362,40 +362,46 @@ fn deployment_status(d: &Value, sets: &[Value], error: Option<&Error>) -> Value 
     let mut conditions = vec![
         condition(
             old,
-            "Available",
-            if available >= desired - unavailable {
-                "True"
-            } else {
-                "False"
+            ConditionSpec {
+                kind: "Available",
+                status: if available >= desired - unavailable {
+                    "True"
+                } else {
+                    "False"
+                },
+                reason: if available >= desired - unavailable {
+                    "MinimumReplicasAvailable"
+                } else {
+                    "MinimumReplicasUnavailable"
+                },
+                message: "observed ReplicaSet availability",
+                update: false,
+                deployment: true,
             },
-            if available >= desired - unavailable {
-                "MinimumReplicasAvailable"
-            } else {
-                "MinimumReplicasUnavailable"
-            },
-            "observed ReplicaSet availability",
-            false,
-            true,
         ),
         condition(
             old,
-            "Progressing",
-            state,
-            reason,
-            "native Deployment reconciliation",
-            progressed,
-            true,
+            ConditionSpec {
+                kind: "Progressing",
+                status: state,
+                reason,
+                message: "native Deployment reconciliation",
+                update: progressed,
+                deployment: true,
+            },
         ),
     ];
     if let Some(error) = error {
         conditions.push(condition(
             old,
-            "ReplicaFailure",
-            "True",
-            "FailedManageReplicaSets",
-            &failure(error),
-            false,
-            true,
+            ConditionSpec {
+                kind: "ReplicaFailure",
+                status: "True",
+                reason: "FailedManageReplicaSets",
+                message: &failure(error),
+                update: false,
+                deployment: true,
+            },
         ));
     } else if let Some(failed) = sets
         .iter()
@@ -404,14 +410,16 @@ fn deployment_status(d: &Value, sets: &[Value], error: Option<&Error>) -> Value 
     {
         conditions.push(condition(
             old,
-            "ReplicaFailure",
-            "True",
-            "FailedCreate",
-            failed["message"]
-                .as_str()
-                .unwrap_or("ReplicaSet reconciliation failed"),
-            false,
-            true,
+            ConditionSpec {
+                kind: "ReplicaFailure",
+                status: "True",
+                reason: "FailedCreate",
+                message: failed["message"]
+                    .as_str()
+                    .unwrap_or("ReplicaSet reconciliation failed"),
+                update: false,
+                deployment: true,
+            },
         ));
     }
     json!({"observedGeneration":d["metadata"]["generation"],"replicas":total,"updatedReplicas":updated,"readyReplicas":ready,"availableReplicas":available,"unavailableReplicas":(desired-available).max(0),"conditions":conditions})
