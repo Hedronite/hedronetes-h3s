@@ -25,7 +25,7 @@ enum Multicall {
     H3s(H3sCli),
     /// Start the control plane + datastore + supervisor (embedded agent unless disabled).
     Server(ServerArgs),
-    /// Enroll a worker and maintain Node/Lease status.
+    /// Enroll a worker, reconcile assigned Pods through configured CRI, and maintain Node/Lease status.
     Agent(AgentArgs),
     /// Inspect the configured local CRI v1 runtime without changing workloads.
     RuntimeInfo(RuntimeArgs),
@@ -50,7 +50,7 @@ struct H3sCli {
 enum Command {
     /// Start the control plane + datastore + supervisor (embedded agent unless disabled).
     Server(ServerArgs),
-    /// Enroll a worker and maintain Node/Lease status.
+    /// Enroll a worker, reconcile assigned Pods through configured CRI, and maintain Node/Lease status.
     Agent(AgentArgs),
     /// Inspect the configured local CRI v1 runtime without changing workloads.
     RuntimeInfo(RuntimeArgs),
@@ -598,7 +598,11 @@ mod tests {
         let err = Multicall::try_parse_from(["h3s", "agent", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = err.to_string();
-        assert!(help.contains("agent"), "{help}");
+        assert!(
+            help.contains("reconcile assigned Pods through configured CRI"),
+            "{help}"
+        );
+        assert!(!help.to_ascii_lowercase().contains("incomplete"), "{help}");
     }
 
     #[test]

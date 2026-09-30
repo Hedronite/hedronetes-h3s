@@ -11,6 +11,7 @@
 
   outputs = { self, nixpkgs, rust-overlay }:
     let
+      workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
       rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -133,7 +134,7 @@
       };
       h3s = rustPlatform.buildRustPackage {
         pname = "h3s";
-        version = "0.9.1";
+        version = workspaceVersion;
         src = pkgs.lib.cleanSourceWith {
           src = self;
           filter = path: type:
@@ -148,13 +149,17 @@
         cargoTestFlags = [ "--workspace" ];
         meta = { platforms = [ system ]; license = pkgs.lib.licenses.asl20; };
       };
+      unsupportedSystem = unsupported:
+        throw "hedronetes-h3s flake does not support ${unsupported}; bundled runtime artifacts are aarch64-linux only";
     in {
       packages.${system} = { inherit h3s bun youki containerd cni-plugins runtime-tools flannel flannel-cni; default = h3s; };
+      packages."x86_64-linux" = unsupportedSystem "x86_64-linux";
       nixosModules.h3s = import ./integration/tower/nixos/h3s.nix;
       devShells.${system}.default = pkgs.mkShell {
         packages = [ rust bun pkgs.cmake pkgs.pkg-config pkgs.protobuf
           pkgs.git pkgs.python3 pkgs.openssl pkgs.nftables pkgs.iproute2 ];
         CARGO_BUILD_JOBS = "4";
       };
+      devShells."x86_64-linux" = unsupportedSystem "x86_64-linux";
     };
 }

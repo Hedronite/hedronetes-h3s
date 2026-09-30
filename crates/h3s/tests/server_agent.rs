@@ -40,6 +40,14 @@ impl Process {
             fs::read_to_string(&self.log).unwrap()
         );
     }
+    #[cfg(unix)]
+    fn signal(&self, signal: &str) {
+        let status = Command::new("kill")
+            .args([signal, &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
             self.child.kill().unwrap();
@@ -317,6 +325,52 @@ async fn local_agent_failure_is_restarted_with_backoff_and_never_drops_the_api()
     drop(occupied);
     let _ = node(&client, &mut server, "server-node", "192.0.2.10").await;
     health(&client, &mut server, "server-node").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduler_restart_does_not_drop_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = server_args(dir.path(), port(), port());
+    args.push("--disable-agent".into());
+    let mut server = Process::start(dir.path(), &args);
+    let client = client(dir.path(), &mut server).await;
+
+    sleep(Duration::from_millis(200)).await;
+    server.signal("-USR1");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            server.assert_running();
+            let log = fs::read_to_string(&server.log).unwrap();
+            if log.contains("h3s scheduler stopped; restarting in 1s") {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler stop was not supervised");
+
+    sleep(Duration::from_secs(2)).await;
+    server.signal("-USR1");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            server.assert_running();
+            let log = fs::read_to_string(&server.log).unwrap();
+            if log.matches("h3s scheduler received SIGUSR1").count() >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler did not restart");
+
+    assert!(Api::<Node>::all(client)
+        .list(&ListParams::default())
+        .await
+        .is_ok());
+    server.assert_running();
 }
 
 #[tokio::test]
