@@ -42,12 +42,39 @@ pub async fn serve(
             _=&mut shutdown=>break,
             Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
             accepted=listener.accept()=>{
-                let (stream,_)=accepted?;
-                let Ok(permit)=permits.clone().try_acquire_owned() else{drop(stream);continue;};
+                let (stream,peer_address)=accepted?;
+                // A rejected or abandoned connection is logged with its peer:
+                // a client that is dropped here sees an empty TLS record and a
+                // reset, which is indistinguishable from a broken path.
+                // Wait briefly for a slot instead of dropping the socket. A
+                // dropped socket is a reset in the client's TLS handshake,
+                // which is indistinguishable from a broken datapath.
+                let permit=match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    permits.clone().acquire_owned(),
+                ).await {
+                    Ok(Ok(permit))=>permit,
+                    Ok(Err(_))=>continue,
+                    Err(_)=>{
+                        eprintln!("h3s apiserver: connection capacity reached, refusing {peer_address}");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let acceptor=acceptor.clone();let router=router.clone();
                 let context=ConnectionContext {shutdown:lifecycle.clone(),_permit:Arc::new(permit)};
                 tasks.spawn(async move {
-                    let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(10),acceptor.accept(stream)).await else{return;};
+                    let stream=match tokio::time::timeout(Duration::from_secs(10),acceptor.accept(stream)).await {
+                        Ok(Ok(stream))=>stream,
+                        Ok(Err(error))=>{
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} failed: {error}");
+                            return;
+                        }
+                        Err(_)=>{
+                            eprintln!("h3s apiserver: TLS handshake with {peer_address} timed out");
+                            return;
+                        }
+                    };
                     let user=match stream.get_ref().1.peer_certificates().and_then(|c|c.first()) {
                         Some(cert)=>match User::from_verified_certificate(cert.as_ref()){Ok(user)=>Some(user),Err(_)=>return},None=>None,
                     };
