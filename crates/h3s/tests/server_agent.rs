@@ -452,7 +452,7 @@ async fn json_logs_and_metrics_are_live_process_surfaces() {
         "h3s_apiserver_requests_total",
         "h3s_store_revision",
         "h3s_watchers",
-        "h3s_scheduler_binds_total 0",
+        "h3s_scheduler_binds_total",
         "h3s_proxy_apply_total",
         "h3s_supervisor_restarts_total",
     ] {

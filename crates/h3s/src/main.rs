@@ -624,7 +624,7 @@ fn metric_text(snapshot: h3s_apiserver::Snapshot) -> String {
             "# TYPE h3s_watchers gauge\n",
             "h3s_watchers {}\n",
             "# TYPE h3s_scheduler_binds_total counter\n",
-            "h3s_scheduler_binds_total 0\n",
+            "h3s_scheduler_binds_total {}\n",
             "# TYPE h3s_proxy_apply_total counter\n",
             "h3s_proxy_apply_total {}\n",
             "# TYPE h3s_supervisor_restarts_total counter\n",
@@ -633,6 +633,7 @@ fn metric_text(snapshot: h3s_apiserver::Snapshot) -> String {
         snapshot.requests,
         snapshot.store_revision,
         snapshot.watches,
+        h3s_scheduler::binds(),
         h3s_proxy::applies(),
         SUPERVISOR_RESTARTS.load(Ordering::Relaxed),
     )

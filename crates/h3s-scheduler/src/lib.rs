@@ -10,9 +10,23 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 pub const SCHEDULER_ID: &str = "system:h3s:scheduler";
+static BINDS: AtomicU64 = AtomicU64::new(0);
+
+/// Pod bindings successfully created by this scheduler process.
+pub fn binds() -> u64 {
+    BINDS.load(Ordering::Relaxed)
+}
+
+fn record_bind(cycle: &mut usize) {
+    BINDS.fetch_add(1, Ordering::Relaxed);
+    *cycle += 1;
+}
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("scheduler API request: {0}")]
@@ -113,7 +127,7 @@ pub async fn reconcile_once(client: Client) -> Result<usize, Error> {
                 {
                     Ok(_) => {
                         objects[index]["spec"]["nodeName"] = node.into();
-                        bound += 1;
+                        record_bind(&mut bound);
                         // A fresh CAS status preserves kubelet updates and never targets a replacement UID.
                         if let Some(current) = api.get_opt(name).await? {
                             if current.metadata.uid.as_deref() == pod["metadata"]["uid"].as_str() {
@@ -171,5 +185,19 @@ async fn condition(
         Ok(_) => Ok(()),
         Err(kube::Error::Api(response)) if matches!(response.code, 404 | 409) => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+
+    #[test]
+    fn successful_bind_increments_cycle_and_process_counters() {
+        let before = binds();
+        let mut cycle = 0;
+        record_bind(&mut cycle);
+        assert_eq!(cycle, 1);
+        assert_eq!(binds(), before + 1);
     }
 }
