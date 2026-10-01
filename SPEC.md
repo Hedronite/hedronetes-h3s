@@ -778,7 +778,28 @@ Rootless is a phase-3 goal, not v1.
 - `h3s` logs on stdout via `tracing`. JSON with `--log-format=json`.
 - Admin endpoints on the supervisor: `/readyz`, `/livez`, `/metrics`.
 - metrics-server addon for `kubectl top`.
-- Backup documented before v1:
+- Durability contract for the durability slice (**not shipped yet**; no
+  `h3s etcd-snapshot` command exists in this tree, and the old etcd
+  snapshot sentence stays not shipped):
+  - **Token rotation.** `h3s token rotate --data-dir DIR` replaces
+    `DIR/server/node-token` with one new value that passes `valid_token`
+    (32–256 printable ASCII). It refuses while
+    `DIR/server/db/.registry.lock` or `DIR/server/.node-token.lock` is
+    held, does not log the secret, and prints the new secret once on
+    stdout. After the next `h3s server` start, the previous token fails
+    join and the new token passes. No TTL; no second token stays valid.
+  - **Offline backup.** `h3s backup --data-dir DIR --output DEST` refuses
+    while the registry lock is held; `DEST` must not already exist. The
+    copy is `server/db/h3s.db`, `h3s.db-wal` and `h3s.db-shm` when those
+    files exist, `server/tls/`, `server/ca.crt`, and `server/node-token`.
+    It does not copy containerd or the rest of the runtime.
+  - **Restore.** `h3s restore --data-dir DIR --from DEST` refuses while
+    the registry lock is held and puts that same set back; a throwaway
+    server on the restored dir answers `/readyz` with `ok`.
+  - **Upgrade, written only.** Stop, replace the `h3s` binary, start with
+    the same data dir and the same flags. No 0.9.1 → 0.11 schema jump is
+    described.
+- Backup of the shipped stores (present tense):
   - SQLite (shipped, one server): copy `/var/lib/hedronetes/server/db/h3s.db` after a
     `PRAGMA wal_checkpoint`.
   - Postgres (shipped, multi-server): `pg_dump` on the shared registry database.
