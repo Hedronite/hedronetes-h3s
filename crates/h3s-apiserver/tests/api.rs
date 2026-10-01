@@ -620,7 +620,8 @@ async fn patches_preserve_identity_validate_preconditions_and_commit_atomically(
         (merge, json!({"metadata":{"resourceVersion":42}}), 422),
         (merge, json!({"data":{"moved":42}}), 422),
         (merge, json!({"metadata":null}), 422),
-        ("application/apply-patch+yaml", json!({}), 501),
+        // A body this server cannot decode is refused, never guessed at.
+        ("application/apply-patch+yaml", json!({}), 415),
         ("application/strategic-merge-patch+json", json!([]), 422),
     ] {
         let (code, failure) = s.patch(s.admin(), path, content_type, value).await;

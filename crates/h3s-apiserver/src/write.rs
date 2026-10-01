@@ -2,7 +2,7 @@
 //! Delete and Pod binding decode their own option objects and commit under
 //! the same admission lock, but never run the resource strategy.
 use crate::{
-    admission, authz, bad, http,
+    admission, apply, authz, bad, http,
     http::Query,
     key, named, node_cidrs, nodes, now, object, patch, pvc,
     resources::{self, Target},
@@ -50,6 +50,11 @@ pub(crate) async fn execute(
     if verb == "delete" {
         return write.delete(wire::decode(&bytes, &content_type)?).await;
     }
+    // An apply is its own verb: it merges field by field and records ownership,
+    // so it never runs the patch codecs or the resourceVersion precondition.
+    if let Some(options) = apply::options(&content_type, query)? {
+        return write.apply(&bytes, &options).await;
+    }
     let Decoded {
         mut value,
         key,
@@ -94,12 +99,16 @@ impl Write<'_> {
     /// object whose apiVersion, kind, name and namespace match the endpoint.
     /// `Resource::normalize` runs here and nowhere else on the write path.
     async fn decode(&self, bytes: &[u8], content_type: &str) -> Result<Decoded> {
-        let target = self.target;
         let value = if self.verb == "patch" {
             self.patched(bytes, content_type).await?
         } else {
             wire::decode(bytes, content_type)?
         };
+        self.normalized(value).await
+    }
+    /// `value` is a complete object for the endpoint, never a patch over one.
+    async fn normalized(&self, value: Value) -> Result<Decoded> {
+        let target = self.target;
         if value["apiVersion"].as_str() != Some(&target.resource.api_version())
             || value["kind"].as_str() != Some(target.resource.kind)
         {
@@ -152,6 +161,48 @@ impl Write<'_> {
             key: key(format!("{}{name}", target.prefix()))?,
             namespace,
         })
+    }
+    /// Server-Side Apply: merge the applied object into what is stored, or
+    /// into nothing when this is the first apply of that name, then run the
+    /// ordinary strategy, admission and commit.
+    async fn apply(&self, bytes: &[u8], options: &apply::Options) -> Result<Response> {
+        if self.target.subresource.is_some() {
+            return Err(Failure::new(
+                400,
+                "BadRequest",
+                "server-side apply writes the whole object, not a subresource",
+            ));
+        }
+        let Decoded {
+            value: applied,
+            key,
+            namespace,
+        } = self
+            .normalized(wire::decode(bytes, "application/json")?)
+            .await?;
+        let stored = self.api.store.get(&key).await?;
+        let old = stored.clone().map(object).transpose()?;
+        let value = match &old {
+            Some(current) => {
+                apply::server_side(self.target.resource, current.clone(), applied, options)?
+            }
+            None => {
+                let mut created = apply::server_side(
+                    self.target.resource,
+                    json!({"apiVersion": applied["apiVersion"], "kind": applied["kind"], "metadata": {}}),
+                    applied,
+                    options,
+                )?;
+                created["metadata"]["uid"] = uuid::Uuid::new_v4().to_string().into();
+                created["metadata"]["creationTimestamp"] = now().into();
+                created
+            }
+        };
+        let mut value = self.prepare(value, old.as_ref())?;
+        self.admit(&key, &mut value, old.as_ref(), namespace.as_ref())
+            .await?;
+        self.persist(key, value, stored.map(|stored| stored.revision))
+            .await
     }
     /// A patch applies to the stored object. The result must keep metadata
     /// and may only name the revision it was computed against.

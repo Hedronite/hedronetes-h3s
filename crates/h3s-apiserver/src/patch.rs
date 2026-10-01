@@ -35,12 +35,13 @@ pub(crate) fn apply(
                 check_size(&object)?;
             }
         }
-        // Server-side apply is its own verb, not a fourth patch codec.
+        // Server-side apply is its own verb, handled before this codec table
+        // (see `apply`), never a fourth merge patch.
         "application/apply-patch+json" | "application/apply-patch+yaml" => {
             return Err(Failure::new(
-                501,
-                "NotImplemented",
-                "server-side apply is not implemented",
+                400,
+                "BadRequest",
+                "server-side apply reaches the apply path, not this codec",
             ))
         }
         _ => return Err(Failure::new(415, "UnsupportedMediaType",

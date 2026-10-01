@@ -5,6 +5,7 @@
 //! `rest::execute`, which serves reads from `read` and runs every mutation
 //! through `write` (decode → concurrency → prepare → admit → persist).
 mod admission;
+mod apply;
 mod authn;
 mod authz;
 mod bootstrap;

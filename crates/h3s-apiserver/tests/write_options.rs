@@ -1,7 +1,25 @@
 //! Write-only request options and codecs, driven through the shipped API.
 mod common;
 use common::Server;
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
+
+/// A PATCH with an explicit content type, so the apply verb is exercised the
+/// way a client that speaks it would.
+async fn patch_as(s: &Server, path: &str, content_type: &str, value: Value) -> (u16, Value) {
+    let response = s
+        .raw(
+            s.admin(),
+            "PATCH",
+            path,
+            value,
+            &[("Content-Type", content_type)],
+        )
+        .await;
+    let code = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (code, serde_json::from_slice(&bytes).unwrap())
+}
 
 fn nulls(value: &Value, path: &str, found: &mut Vec<String>) {
     match value {
@@ -94,16 +112,43 @@ async fn patch_media_types_list_codecs_and_apply_is_a_separate_unimplemented_ver
     s.namespace("team-a").await;
     let original = s.configmap("settings", "one").await;
     let path = "/api/v1/namespaces/team-a/configmaps/settings";
-    let apply = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"settings"},"data":{"value":"two"}});
-    for content_type in [
+    // The apply exercise uses its own object, so the rest of this test still
+    // describes the object it created above.
+    let s2 = s.json(s.admin(), "POST", "/api/v1/namespaces/team-a/configmaps", json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"applied"},"data":{"value":"one"}})).await;
+    assert_eq!(s2.0, 201, "{s2:?}");
+    let apply_path = "/api/v1/namespaces/team-a/configmaps/applied";
+    let apply = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"applied"},"data":{"value":"two"}});
+    // Server-side apply is a real verb now: it refuses a body it cannot decode
+    // rather than guessing at it, it needs the manager that owns what it
+    // writes, and with one it merges and records ownership.
+    let (code, failure) = patch_as(
+        &s,
+        apply_path,
         "application/apply-patch+yaml",
+        apply.clone(),
+    )
+    .await;
+    assert_eq!(code, 415, "{failure}");
+    let (code, failure) = patch_as(
+        &s,
+        apply_path,
         "application/apply-patch+json",
-    ] {
-        let (code, failure) = s.patch(s.admin(), path, content_type, apply.clone()).await;
-        assert_eq!(code, 501, "{content_type}: {failure}");
-        assert_eq!(failure["reason"], "NotImplemented", "{failure}");
-        assert_eq!(failure["message"], "server-side apply is not implemented");
-    }
+        apply.clone(),
+    )
+    .await;
+    assert_eq!(code, 400, "{failure}");
+    assert_eq!(failure["reason"], "BadRequest", "{failure}");
+    let (code, owned) = patch_as(
+        &s,
+        &format!("{apply_path}?fieldManager=tests"),
+        "application/apply-patch+json",
+        apply.clone(),
+    )
+    .await;
+    assert_eq!(code, 200, "{owned}");
+    assert_eq!(owned["data"]["value"], "two");
+    assert_eq!(owned["metadata"]["managedFields"][0]["manager"], "tests");
+    assert_eq!(owned["metadata"]["managedFields"][0]["operation"], "Apply");
     let (code, failure) = s
         .patch(
             s.admin(),
