@@ -659,8 +659,8 @@ Disable with `--disable=name` or `--disable=name1,name2`.
 | Addon | Default | Notes |
 |---|---|---|
 | coredns | on | Cluster DNS |
-| servicelb | on, planned | To be built; default-on when it lands, skipped by `--disable=servicelb` |
-| traefik | on, planned | To be built; default-on when it lands, skipped by `--disable=traefik` |
+| servicelb | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
+| traefik | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
 | local-storage | on | local-path-provisioner |
 | metrics-server | on | |
 | helm-controller | off until v0.3 | HelmChart CRD, kube-rs implementation |
@@ -765,7 +765,7 @@ Rootless is a phase-3 goal, not v1.
 - kubelet serving certs rotated.
 - Bound SA tokens (no permanent tokens for default SAs).
 - NodeRestriction + node authorizer.
-- Secrets encryption at rest is **planned**: Secret payloads sealed with Geode `seal` / `open` (GDE1) — not a second cipher, and not active until that build lands. It is not a MUST of the current tag.
+- Secrets encryption at rest is **planned**: Secret payloads sealed with Geode `seal` / `open` (GDE1) — not a second cipher, and not active until that build lands; Facet is the agent path to that vault. It is not a MUST of the current tag.
 - Pod Security restricted default for non-system namespaces, configurable.
 - No anonymous write. Anonymous read limited to `/readyz` `/livez` `/version`
   as in upstream.
@@ -841,8 +841,10 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening still reserved here: NodeRestriction, Server-Side Apply,
-  secrets encryption. Bound ServiceAccount tokens shipped in v0.10.0.
+- Hardening still reserved here: NodeRestriction; Server-Side Apply field
+  managers, planned; secrets encryption at rest, planned via Geode
+  `seal` / `open` with Facet as the agent path. Bound ServiceAccount
+  tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
 - musl static release binaries, amd64 + arm64; documented backup /

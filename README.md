@@ -165,9 +165,9 @@ cargo run -p h3s -- agent --help
 
 A line in this README is a build. It stays until the behavior lands.
 
-- **Traefik and ServiceLB.** Packaged add-ons, default-on, skipped with `--disable=traefik,servicelb`.
-- **Server-Side Apply.** Field managers, so `kubectl apply --server-side` works.
-- **Secrets encryption at rest.** Secret payloads sealed with Geode. Facet is the agent path to that vault.
+- **Traefik and ServiceLB.** Packaged add-ons, default-on when built, skipped with `--disable=traefik,servicelb`.
+- **Server-Side Apply.** Field managers, so `kubectl apply --server-side` works when built.
+- **Secrets encryption at rest.** Secret payloads sealed with Geode `seal` / `open`. Facet is the agent path to that vault. h3s does not grow a second cipher.
 
 ## In Development
 
