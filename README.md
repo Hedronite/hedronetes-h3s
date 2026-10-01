@@ -37,9 +37,6 @@ Status: **0.10.0** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd
 - **Not** “rip out EKS/GKE and move to h3s.”
 - **Not** a claim of full Kubernetes conformance (see [Implemented API](#implemented-api); StatefulSet/Job/PVC/NetworkPolicy still out).
 - **Not** federation-as-default (optional enterprise packaging later — not the default install story).
-- **Not** k3s addon parity: Traefik and ServiceLB are **default-off and not shipped** in this tag.
-- **Not** Server-Side Apply: unsupported in this tag — `kubectl apply --server-side` is not claimed to work.
-- **Not** secrets encryption at rest: Secret payloads are not encrypted at rest in this tag.
 
 ## How EKS/GKE teams use it
 
@@ -141,11 +138,12 @@ kubectl apply -f examples/supported-pod.yaml
 - **`--disable=`** (k3s-style, comma-separated add-on names): in development; **not shipped** until there are add-ons to disable.
 - **Flannel:** an explicit host daemon (systemd unit via the Nix flake), not a h3s add-on and never a DaemonSet. Run it per node yourself. See [`docs/addons.md`](./docs/addons.md).
 
-## Platform services (Facet + HedronDB)
+## Platform services (Facet, Geode, HedronDB)
 
 Deploy as **shared cluster services** — not per-agent PVCs:
 
-- **[Facet](https://github.com/VirtualMachinist/facet)** — API recipe / run-history client (Lattice).
+- **[Facet](https://github.com/VirtualMachinist/facet)** — API recipe and run-history client. Agents call the cluster, and Geode, through Facet. `geode agent serve` is already driven from a Facet collection.
+- **[Geode](https://github.com/Hedronite/geode)** — custody. Secret encryption at rest uses Geode `seal` / `open` (GDE1). h3s does not grow a second cipher.
 - **[HedronDB](https://github.com/VirtualMachinist/hedrondb)** — durable intent store with HQL.
 
 Agents reach them via normal Services and workload identity; platform durability does not require mounting a store PVC into every agent Pod.
@@ -162,6 +160,14 @@ cargo run -p h3s -- --help
 cargo run -p h3s -- server --help
 cargo run -p h3s -- agent --help
 ```
+
+## Planned
+
+A line in this README is a build. It stays until the behavior lands.
+
+- **Traefik and ServiceLB.** Packaged add-ons, default-on, skipped with `--disable=traefik,servicelb`.
+- **Server-Side Apply.** Field managers, so `kubectl apply --server-side` works.
+- **Secrets encryption at rest.** Secret payloads sealed with Geode. Facet is the agent path to that vault.
 
 ## In Development
 
