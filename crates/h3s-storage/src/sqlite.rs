@@ -172,7 +172,7 @@ impl SqliteStore {
                 "UPDATE registry_meta SET revision=revision+1 WHERE singleton=1",
                 [],
             )?;
-            obj.revision = head(&tx)?.0;
+            let new_revision = head(&tx)?.0;
             let returned_value = if delete {
                 obj.value.clone()
             } else {
@@ -182,13 +182,20 @@ impl SqliteStore {
                 "INSERT INTO registry_versions(key,revision,value,kind) VALUES(?1,?2,?3,?4)",
                 params![
                     obj.key.as_str(),
-                    revision_i64(obj.revision)?,
+                    revision_i64(new_revision)?,
                     &obj.value,
                     kind_number(kind)
                 ],
             )?;
             tx.commit()?;
+            let stored_revision: i64 = connection.query_row(
+                "SELECT revision FROM registry_versions WHERE key=?1 ORDER BY revision DESC LIMIT 1",
+                [obj.key.as_str()],
+                |r| r.get(0),
+            )?;
+            let stored_revision = read_revision_row(stored_revision)?;
             Ok(StoredObject {
+                revision: stored_revision,
                 value: returned_value,
                 ..obj
             })
@@ -260,6 +267,10 @@ impl SqliteStore {
 fn read_revision(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn read_revision_row(value: i64) -> rusqlite::Result<ResourceVersion> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
 }
 
 fn revision_i64(rev: ResourceVersion) -> Result<i64> {
