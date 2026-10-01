@@ -37,7 +37,7 @@ It copies k3s’s *product shape*:
 
 - one statically linked binary
 - `server` and `agent` personalities
-- SQLite by default, etcd (or SQL) for HA
+- SQLite for one server (shipped); Postgres for more than one server (planned); etcd, MySQL, and Xline not implemented
 - batteries included and `--disable=`-able
 - edge, homelab, CI, air-gap first
 - stock `kubectl`, Helm, and YAML
@@ -90,7 +90,8 @@ Stylized **h3s** the same way Kubernetes is k8s and the lightweight distro is k3
 5. HA is first-class: three servers + agents, join tokens, supervisor tunnel.
 6. Default OCI runtime is **youki**, not runc.
 7. Default kube-proxy datapath is **nftables**, not iptables.
-8. Storage is a trait. SQLite, etcd, Postgres, MySQL are backends.
+8. Storage is a trait. SQLite is the shipped backend (one server); Postgres
+   for more than one server is planned; etcd and MySQL are not implemented.
 9. Kubelet pod lifecycle is a compile-time state machine.
 
 ### 2.2 Non-goals
@@ -204,8 +205,9 @@ h3s agent     # kubelet + kube-proxy + CNI + runtime + tunnel client
 
 ### 3.1 Single-server (default)
 
-One host, `h3s server`, embedded SQLite, embedded agent. This is the laptop,
-CI, and appliance path.
+One host, `h3s server`, embedded SQLite (shipped), embedded agent. This is the laptop,
+CI, and appliance path. More than one `h3s server` is a Postgres shape —
+planned, not shipped (§3.3).
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -227,12 +229,16 @@ Do not skip it. A Rust apiserver without this tunnel is not a k3s.
 
 ### 3.3 High availability
 
-Odd number of servers (≥ 3) sharing a HA datastore (embedded etcd, external
-etcd, or Postgres/MySQL). Agents join a fixed registration address (VIP or
-load balancer) on `:6443`. After join, each agent learns the current
-apiserver endpoint list and load-balances.
+**Planned, not shipped.** Odd number of servers (≥ 3) sharing a HA
+datastore. With more than one `h3s server`, the datastore is **Postgres**
+(planned; the build that adds `--store=postgres` has not landed). etcd,
+MySQL, and Xline stay not implemented. Agents join a fixed registration
+address (VIP or load balancer) on `:6443`. After join, each agent learns
+the current apiserver endpoint list and load-balances.
 
 SQLite **MUST NOT** be used with more than one server. Same rule as k3s.
+`h3s agent` has no datastore: agents hold no registry state; all reads
+and writes go through the API server.
 
 ### 3.4 Ports
 
@@ -241,16 +247,16 @@ SQLite **MUST NOT** be used with more than one server. Same rule as k3s.
 | 6443 | Kubernetes API + supervisor | Combined default, like k3s |
 | 9345 | Supervisor only | Optional split |
 | 10250 | kubelet | Localhost-only when tunnel is on |
-| 2379–2380 | etcd | HA store only |
+| 2379–2380 | etcd | HA store only — etcd not implemented; n/a until a HA store lands |
 | CNI overlay | per backend | flannel VXLAN default |
 
 ### 3.5 Join and identity
 
 - Shared cluster token at `/var/lib/hedronetes/server/node-token`.
 - Separate `--agent-token` MAY exist so agents cannot join as servers.
-- `--cluster-init` bootstraps the first HA server.
-- Subsequent servers: `h3s server --server https://vip:6443 --token …`
-- Agents: `h3s agent --server https://vip:6443 --token …`
+- `--cluster-init` bootstraps the first HA server (planned; not shipped — Postgres for >1 server, not landed).
+- Subsequent servers: `h3s server --server https://vip:6443 --token …` (planned; not shipped)
+- Agents: `h3s agent --server https://vip:6443 --token …` (shipped; the agent has no datastore)
 - Node password / NodeRestriction as in k3s/Kubernetes.
 
 ---
@@ -327,10 +333,11 @@ in this table are required defaults.
 
 | Crate | Backend |
 |---|---|
-| `rusqlite` or `sqlx` (sqlite) | Default single-server |
-| `sqlx` (postgres, mysql) | External HA without etcd operations |
-| `etcd-client` | Default HA |
-| Xline client | Optional WAN store, feature `store-xline`, **not** default |
+| `rusqlite` or `sqlx` (sqlite) | One server (shipped) |
+| `sqlx` (postgres) | More than one server — planned, not shipped |
+| `sqlx` (mysql) | Not implemented |
+| `etcd-client` | Not implemented |
+| Xline client | Not implemented |
 
 ### 5.4 Node
 
@@ -353,7 +360,7 @@ k3s does (extract on boot into the data dir).
 |---|---|
 | Anvil / Verus verified RS, Deployment, STS | Feature `verified-controllers`, extra CI. Not required to boot. |
 | Kubewarden | Wasm admission, opt-in |
-| Xline | `--store=xline` |
+| Xline | `--store=xline` — not implemented; surface in design only |
 | Spegel-like registry mirror | After v0.3 |
 | Gateway API | Via Traefik first, native later |
 
@@ -473,20 +480,23 @@ response. That is the Go failure mode we refuse to copy.
 
 | Flag | When | Multi-server |
 |---|---|---|
-| `--store=sqlite` | **Default** single-server | No |
-| `--store=etcd` | **Default HA** (`--cluster-init`) | Yes |
-| `--store=postgres` / `--store=mysql` | External HA, no etcd ops | Yes |
+| `--store=sqlite` | **Shipped**: one `h3s server` | No |
+| `--store=postgres` | **Planned, not shipped**: more than one `h3s server` | Yes |
+| `--store=mysql` | Not implemented | — |
+| `--store=etcd` | Not implemented | — |
 | `--store=memory` | Tests | No |
-| `--store=xline` | Opt-in WAN | Yes, feature-flagged |
+| `--store=xline` | Not implemented | — |
 
 SQLite implementation is h3s’s own Kine-shaped MVCC table *behind the trait*,
 in-process. We do not run a separate Kine process on the default path.
 
-etcd remains the conservative HA default. Xline is an etcd-API-compatible
-Rust store that is interesting for geo-distributed control planes. It is not
-the HA default until it has its own soak in h3s CI.
+Postgres is the multi-server store, planned, not shipped: the build that
+adds it has not landed, and until it does, more than one `h3s server` is
+not a supported shape. etcd, MySQL, and Xline stay not implemented —
+neither a default HA nor an opt-in backend ships for them today.
 
-HedronDB is not a `--store=` backend. See §2.4.
+HedronDB is not a `--store=` backend. See §2.4. Jev and pgvector are not
+h3s store features either.
 
 ---
 
@@ -696,7 +706,7 @@ curl -sfL https://get.hedronetes.dev | sh -
 # single node
 h3s server
 
-# HA
+# HA — planned, not shipped (Postgres for >1 server; etcd, MySQL, Xline not implemented)
 h3s server --cluster-init
 h3s server --server https://vip:6443 --token "$TOKEN"
 
@@ -750,10 +760,11 @@ Rootless is a phase-3 goal, not v1.
 - `h3s` logs on stdout via `tracing`. JSON with `--log-format=json`.
 - Admin endpoints on the supervisor: `/readyz`, `/livez`, `/metrics`.
 - metrics-server addon for `kubectl top`.
-- etcd / SQLite backup documented before v1:
-  - SQLite: copy ` /var/lib/hedronetes/server/db/h3s.db` after a
+- Backup documented before v1:
+  - SQLite (shipped, one server): copy `/var/lib/hedronetes/server/db/h3s.db` after a
     `PRAGMA wal_checkpoint`.
-  - etcd: `etcdctl snapshot` via a wrapped `h3s etcd-snapshot` command.
+  - Postgres (planned, not shipped): `pg_dump` on the shared registry database.
+  - etcd: not implemented, no backup path documented for it in this tag.
 - Version output: `h3s --version` prints h3s version, pinned Kubernetes
   minor, youki version, containerd version.
 
@@ -793,7 +804,7 @@ second versioning axis.
 | **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
 | **v0.10.0** (shipped, tag) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods, bound tokens, ClusterIP and NodePort, local-path PVC | the remainder of “v0.2 — k3s-shaped” that holds without HA |
 | **v0.11.0** (shipped, tag) | Server-Side Apply, opt-in Geode secrets encryption, default-on Traefik and ServiceLB | the three behaviors restored after the contract strike; not the HA milestone |
-| **v1.0.0** (reserved) | **M2** — etcd/Postgres HA, security MUSTs, official conformance | “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
+| **v1.0.0** (reserved) | **M2** — Postgres HA (planned; more than one `h3s server`; etcd/MySQL/Xline not implemented), security MUSTs, official conformance | “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
 ### v0.9.0 — M1 subset (shipped)
 
@@ -831,8 +842,8 @@ system rather than a collection of parts.
   in [`docs/addons.md`](./docs/addons.md).
 - NodePort, local-path PVC, and bound ServiceAccount tokens ship in
   v0.10.0. CoreDNS remains not shipped. Traefik and ServiceLB ship in
-  v0.11.0. The sqlite → etcd upgrade path (`--cluster-init`) stays
-  reserved for v1.0.0.
+  v0.11.0. The HA upgrade path (`--cluster-init` over Postgres) stays
+  reserved and planned; etcd is not implemented.
 
 **DoD:** one SQLite server plus agents, `kubectl apply` of the documented
 default Pod reaches Running behind a ClusterIP Service, and killing
@@ -856,8 +867,9 @@ in-process control tasks does not kill the API.
 
 Not shipped. Nothing below is present tense.
 
-- Durable high availability: 3-server etcd or Postgres, lease leader
-  election for controllers.
+- Durable high availability: more than one `h3s server` on Postgres
+  (planned, not shipped), lease leader election for controllers. etcd,
+  MySQL, and Xline stay not implemented.
 - Hardening still reserved here: NodeRestriction. Server-Side Apply,
   Geode secrets encryption, and Traefik and ServiceLB shipped in v0.11.0.
   Bound ServiceAccount tokens shipped in v0.10.0.
@@ -1158,7 +1170,7 @@ the Kubernetes wire protocol win.** Prior art does not outrank §6.
 | youki / libcontainer | Default OCI runtime | Claim it beats crun on spawn latency |
 | containerd | CRI server (supervised / embedded binary) | Rewrite the CRI server in Rust for v1 |
 | Anvil / Verus | Optional verified RS/Deploy/STS loops | Required compile; “formally verified control plane” as the v1 claim |
-| Xline | Optional `--store=xline` | Default HA store ahead of an h3s soak |
+| Xline | `--store=xline` surface in design | Default HA store; not implemented in this line |
 
 ### 21.8 How to use this section in review
 
