@@ -11,8 +11,10 @@ use futures_core::Stream;
 
 mod geode;
 
+mod postgres;
 mod sqlite;
 pub use geode::GeodeSealer;
+pub use postgres::PostgresStore;
 pub use sqlite::SqliteStore;
 
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
