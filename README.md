@@ -132,10 +132,10 @@ kubectl apply -f examples/supported-pod.yaml
 
 ## Add-ons
 
-- Flavor follows k3s: cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
-- **Shipped today:** `h3s server --disable-agent`, and the packaged add-ons **CoreDNS** and **Traefik + ServiceLB** (default-on; `--disable=traefik,servicelb` skips both — see [Shipped](#shipped)).
-- **CoreDNS:** packaged add-on; the cluster PKI issues the `system:coredns` client identity, and the add-on manager applies it on server start.
-- **`--disable=`** (k3s-style, comma-separated add-on names): shipped; see the add-on table in `SPEC.md` §12.
+- Flavor follows k3s: optional cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
+- **Shipped today:** `h3s server --disable-agent`, and the packaged add-ons **Traefik + ServiceLB** (default-on; `--disable=traefik,servicelb` skips both — see [Shipped](#shipped)).
+- **CoreDNS:** **not shipped**. The cluster PKI issues the `system:coredns` client identity, so CoreDNS can be run manually against a lab cluster, but no add-on manager applies it today.
+- **`--disable=`** (k3s-style, comma-separated add-on names): shipped for Traefik and ServiceLB; see the add-on table in `SPEC.md` §12.
 - **Flannel:** an explicit host daemon (systemd unit via the Nix flake), not a h3s add-on and never a DaemonSet. Run it per node yourself. See [`docs/addons.md`](./docs/addons.md).
 
 ## Platform services (Facet, Geode, HedronDB)

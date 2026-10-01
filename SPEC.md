@@ -828,9 +828,9 @@ system rather than a collection of parts.
   an explicit error until a real backend exists (M2, §16 v1.0.0 scope).
 - Cluster add-ons (CoreDNS) and `--disable=` follow the shape documented
   in [`docs/addons.md`](./docs/addons.md).
-- NodePort, local-path PVC, the packaged add-ons (CoreDNS, Traefik,
-  ServiceLB — default-on, skippable with `--disable=traefik,servicelb`),
-  and bound ServiceAccount tokens ship in this line. The
+- NodePort, local-path PVC, the packaged add-ons (Traefik and ServiceLB —
+  default-on, skippable with `--disable=traefik,servicelb`; CoreDNS remains
+  not shipped), and bound ServiceAccount tokens ship in this line. The
   sqlite → etcd upgrade path (`--cluster-init`) stays reserved for
   v1.0.0.
 
@@ -844,7 +844,7 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening landing on this line: NodeRestriction; Server-Side Apply field
+- Hardening still reserved here: NodeRestriction; Server-Side Apply field
   managers shipped on `c3fd6b5be3649ee4cea272d699f4f7174502d990`; secrets
   encryption at rest shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc`
   (Geode `seal` / `open`, Facet as the agent path). Bound ServiceAccount
