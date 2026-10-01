@@ -1,5 +1,7 @@
 //! In-tree kube-rs reconciliation. This crate has no registry storage dependency.
 mod node_cidrs;
+mod servicelb;
+mod traefik;
 mod workload;
 use futures_util::StreamExt;
 pub use h3s_api::network::NODE_CIDR_CONTROLLER_ID;
@@ -19,7 +21,9 @@ use kube::{
 };
 pub use node_cidrs::{node_cidrs_once, run_node_cidr_controller};
 use serde::de::DeserializeOwned;
+pub use servicelb::{run_servicelb, servicelb_once, SERVICELB_CONTROLLER_ID};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
+pub use traefik::{run_traefik, Gateway as TraefikGateway, TRAEFIK_CONTROLLER_ID};
 pub use workload::{
     deployment_once, endpoint_gc_once, endpoints_once, gc_once, replicaset_once,
     run_deployment_controller, run_endpoint_controller, run_replicaset_controller, run_workload_gc,

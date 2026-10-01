@@ -6,6 +6,7 @@ use k8s_openapi::api::{
         ServiceAccount,
     },
     discovery::v1::EndpointSlice,
+    networking::v1::Ingress,
     rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding},
     storage::v1::StorageClass,
 };
@@ -146,6 +147,13 @@ pub(crate) const RESOURCES: &[Resource] = &[
         kind: "StorageClass",
         namespaced: false,
     },
+    Resource {
+        group: "networking.k8s.io",
+        version: "v1",
+        plural: "ingresses",
+        kind: "Ingress",
+        namespaced: true,
+    },
 ];
 impl Resource {
     pub fn valid_name(&self, name: &str) -> bool {
@@ -173,6 +181,7 @@ impl Resource {
                 | "Deployment"
                 | "ReplicaSet"
                 | "PersistentVolumeClaim"
+                | "Ingress"
         )
     }
     pub fn has_generation(&self) -> bool {
@@ -210,6 +219,7 @@ impl Resource {
             "PersistentVolume" => convert::<PersistentVolume>(value),
             "PersistentVolumeClaim" => convert::<PersistentVolumeClaim>(value),
             "StorageClass" => convert::<StorageClass>(value),
+            "Ingress" => convert::<Ingress>(value),
             _ => unreachable!("static resource table"),
         }
     }
