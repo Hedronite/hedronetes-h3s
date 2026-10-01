@@ -193,7 +193,7 @@ async fn rotate_rejects_old_token_before_restore_and_restores_sqlite() {
     .unwrap();
     let runtime = dir.path().join("runtime");
     let backup = dir.path().join("backup");
-    let busy_backup = command(&vec![
+    let busy_backup = command(&[
         "backup".into(),
         "--data-dir".into(),
         runtime.display().to_string(),
@@ -203,7 +203,7 @@ async fn rotate_rejects_old_token_before_restore_and_restores_sqlite() {
     assert!(!busy_backup.status.success());
     initial.stop();
 
-    let backup_out = command(&vec![
+    let backup_out = command(&[
         "backup".into(),
         "--data-dir".into(),
         runtime.display().to_string(),
@@ -216,7 +216,7 @@ async fn rotate_rejects_old_token_before_restore_and_restores_sqlite() {
         String::from_utf8_lossy(&backup_out.stderr)
     );
     let old = fs::read_to_string(runtime.join("server/node-token")).unwrap();
-    let rotate = command(&vec![
+    let rotate = command(&[
         "token".into(),
         "rotate".into(),
         "--data-dir".into(),
@@ -270,7 +270,7 @@ async fn rotate_rejects_old_token_before_restore_and_restores_sqlite() {
     for member in ["h3s.db", "h3s.db-wal", "h3s.db-shm"] {
         let _ = fs::remove_file(runtime.join("server/db").join(member));
     }
-    let restore = command(&vec![
+    let restore = command(&[
         "restore".into(),
         "--data-dir".into(),
         runtime.display().to_string(),
