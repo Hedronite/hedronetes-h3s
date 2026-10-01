@@ -171,6 +171,15 @@ The first three ship in tag `v0.11.0`. They were not in tag `v0.10.0`. The store
 - **Multi-server Postgres store.** `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`: a revision, conflict on a stale `resourceVersion`, watch resume, compaction failing the old watch, and a Geode seal whose plaintext is absent from a raw SQL read and returned by `open`.
 - **`--store=postgres`.** Shipped on `512f220de42ed989f937ad7625a7de732247797b`: requires `--datastore-endpoint` with a `postgres://` URL and talks to one Postgres primary; two `h3s server` processes share it — a create on the first is read on the second. SQLite stays the one-server default. `--secrets-encryption` on that store uses the existing Geode sealer. etcd, MySQL, and Xline are not implemented; `h3s agent` has no datastore.
 
+## Durability (contract for this slice)
+
+This is the durability contract now being built; these subcommands are **not shipped yet** and this is not the HA milestone.
+
+- **Token rotation.** `h3s token rotate --data-dir DIR` will replace `DIR/server/node-token` with one new value that passes `valid_token` (32–256 printable ASCII). It refuses while `DIR/server/db/.registry.lock` or `DIR/server/.node-token.lock` is held, does not log the secret, and prints the new secret once on stdout. After the next `h3s server` start, a join presenting the previous token fails and a join presenting the new token passes. No TTL; no second token stays valid.
+- **Offline backup.** `h3s backup --data-dir DIR --output DEST` will refuse while the registry lock is held; `DEST` must not already exist. The copy is `server/db/h3s.db`, `h3s.db-wal` and `h3s.db-shm` when those files exist, `server/tls/`, `server/ca.crt`, and `server/node-token` — not containerd or the rest of the runtime.
+- **Restore.** `h3s restore --data-dir DIR --from DEST` will refuse while the registry lock is held and puts that same set back; a throwaway server on the restored dir then answers `/readyz` with `ok`.
+- **Upgrade, written only.** An upgrade is: stop, replace the `h3s` binary, start with the same data dir and the same flags. No schema-jump drill (e.g. 0.9.1 → 0.11) is described.
+
 ## In Development
 
 - Full Kubernetes conformance and durable high availability multi-control-plane (see [Status](#status)).
