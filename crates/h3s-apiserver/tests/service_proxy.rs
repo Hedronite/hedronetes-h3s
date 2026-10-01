@@ -157,6 +157,20 @@ async fn node_port_services_are_admitted_allocated_and_immutable() {
             .0,
         422
     );
+    let (code, load_balancer) = s
+        .json(
+            s.admin(),
+            "POST",
+            base,
+            create(
+                "loadbalancer",
+                json!({"type":"LoadBalancer","ports":[{"name":"http","port":80}]}),
+            ),
+        )
+        .await;
+    assert_eq!(code, 201, "{load_balancer}");
+    assert_eq!(load_balancer["spec"]["type"], "LoadBalancer");
+    assert_ne!(load_balancer["spec"]["clusterIP"], json!("None"));
     for (name, spec) in [
         (
             "range",
@@ -165,10 +179,6 @@ async fn node_port_services_are_admitted_allocated_and_immutable() {
         (
             "taken",
             json!({"type":"NodePort","ports":[{"name":"http","port":80,"nodePort":30080}]}),
-        ),
-        (
-            "loadbalancer",
-            json!({"type":"LoadBalancer","ports":[{"name":"http","port":80}]}),
         ),
         (
             "local",

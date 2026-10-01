@@ -12,7 +12,10 @@ pub enum ServiceForwarding {
     ExternalName,
     /// Headless services (`clusterIP: None`) are skipped by the proxy.
     Headless,
-    /// LoadBalancer and other types the single-server API does not implement.
+    /// ServiceLB assigns this an address; the proxy forwards it like a
+    /// ClusterIP frontend.
+    LoadBalancer,
+    /// Types the single-server API does not implement.
     UnsupportedType,
     /// Session, traffic, or external-address policy the native proxy does not implement.
     UnsupportedPolicy,
@@ -33,7 +36,7 @@ impl ServiceForwarding {
                 Self::UnsupportedType
             };
         }
-        if !matches!(kind, "ClusterIP" | "NodePort") {
+        if !matches!(kind, "ClusterIP" | "NodePort" | "LoadBalancer") {
             return Self::UnsupportedType;
         }
         if spec["sessionAffinity"]
@@ -53,11 +56,14 @@ impl ServiceForwarding {
         if kind == "NodePort" {
             return Self::NodePort;
         }
+        if kind == "LoadBalancer" {
+            return Self::LoadBalancer;
+        }
         Self::ClusterIp
     }
 
     pub fn proxied(self) -> bool {
-        matches!(self, Self::ClusterIp | Self::NodePort)
+        matches!(self, Self::ClusterIp | Self::NodePort | Self::LoadBalancer)
     }
 
     pub fn skip_in_plan(self) -> bool {
@@ -98,8 +104,15 @@ mod tests {
             ServiceForwarding::NodePort
         );
         assert!(ServiceForwarding::NodePort.proxied());
+        assert_eq!(
+            ServiceForwarding::classify(
+                &json!({"type":"LoadBalancer","clusterIP":"10.43.0.10","externalTrafficPolicy":"Cluster","ports":[{"port":80}]})
+            ),
+            ServiceForwarding::LoadBalancer
+        );
+        assert!(ServiceForwarding::LoadBalancer.proxied());
         for rejected in [
-            json!({"type":"LoadBalancer","clusterIP":"10.43.0.10","ports":[{"port":80}]}),
+            json!({"type":"Gateway","clusterIP":"10.43.0.10","ports":[{"port":80}]}),
             json!({"type":"NodePort","clusterIP":"None","ports":[{"port":80}]}),
         ] {
             assert_eq!(

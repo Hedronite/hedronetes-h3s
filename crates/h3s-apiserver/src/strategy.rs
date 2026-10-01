@@ -165,6 +165,23 @@ pub(crate) fn prepare(
             }
         }
         "EndpointSlice" => endpoints(&mut value)?,
+        "Ingress" => {
+            if !value["spec"].is_object() {
+                return Err(invalid("Ingress spec is required"));
+            }
+            if value["spec"]
+                .get("rules")
+                .is_some_and(|rules| !rules.is_array())
+            {
+                return Err(invalid("spec.rules must be an array"));
+            }
+            if value["spec"]
+                .get("defaultBackend")
+                .is_some_and(|backend| !backend.is_object())
+            {
+                return Err(invalid("spec.defaultBackend must name a Service"));
+            }
+        }
         "Lease"
             if value["spec"]["leaseDurationSeconds"]
                 .as_i64()
@@ -502,8 +519,8 @@ fn service(spec: &mut Value) -> Result<()> {
     default(spec, "type", json!("ClusterIP"));
     one_of(
         &spec["type"],
-        &["ClusterIP", "NodePort", "ExternalName"],
-        "currently supported Service types are ClusterIP, NodePort and ExternalName",
+        &["ClusterIP", "NodePort", "ExternalName", "LoadBalancer"],
+        "currently supported Service types are ClusterIP, NodePort, ExternalName and LoadBalancer",
     )?;
     if spec["type"] == "ExternalName" {
         if !spec["externalName"]

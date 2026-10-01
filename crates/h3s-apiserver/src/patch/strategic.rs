@@ -407,7 +407,7 @@ mod tests {
             // them is an explicit error, not a guess.
             if matches!(
                 resource.kind,
-                "PersistentVolume" | "PersistentVolumeClaim" | "StorageClass"
+                "PersistentVolume" | "PersistentVolumeClaim" | "StorageClass" | "Ingress"
             ) {
                 assert!(schemas()["roots"][resource.kind].is_null());
             } else {

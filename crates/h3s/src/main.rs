@@ -120,6 +120,14 @@ struct ServerArgs {
     /// Run the control plane without registering or running a local agent.
     #[arg(long)]
     disable_agent: bool,
+    /// Turn off shipped add-ons: --disable=traefik,servicelb. Both are on
+    /// unless named here.
+    #[arg(long, value_delimiter = ',')]
+    disable: Vec<String>,
+    /// HTTP port the Traefik gateway serves Ingress traffic on; zero asks
+    /// the kernel for a free port, preventing concurrent servers colliding.
+    #[arg(long, default_value_t = 0)]
+    traefik_http_port: u16,
     /// Local node name; defaults to the lowercase system hostname.
     #[arg(long)]
     node_name: Option<String>,
@@ -301,6 +309,8 @@ fn allowed_config(command: &str, key: &str) -> bool {
                     | "cluster-cidr"
                     | "node-cidr-mask-size"
                     | "disable-agent"
+                    | "disable"
+                    | "traefik-http-port"
             ),
             "agent" => matches!(key, "server" | "server-ca-file"),
             _ => false,
@@ -750,6 +760,24 @@ fn local_node(
     Ok(Some((name, ip)))
 }
 
+/// Validate the `--disable` list. Only shipped add-ons may be turned off.
+fn parse_addons(disabled: &[String]) -> std::result::Result<(bool, bool), String> {
+    let mut traefik = true;
+    let mut servicelb = true;
+    for name in disabled {
+        match name.as_str() {
+            "traefik" => traefik = false,
+            "servicelb" => servicelb = false,
+            other => {
+                return Err(format!(
+                    "unknown add-on {other:?} in --disable; supported: traefik, servicelb"
+                ))
+            }
+        }
+    }
+    Ok((traefik, servicelb))
+}
+
 async fn run_server(args: ServerArgs) -> RunResult {
     let node = local_node(&args)?;
     let cluster_dns = args
@@ -879,6 +907,16 @@ async fn run_server(args: ServerArgs) -> RunResult {
         "https://{}",
         std::net::SocketAddr::new(connect_ip, local.port())
     );
+    let (traefik_on, servicelb_on) =
+        parse_addons(&args.disable).map_err(|message| input_error(&message))?;
+    let gateway_listener = match traefik_on {
+        true => Some(tokio::net::TcpListener::bind((connect_ip, args.traefik_http_port)).await?),
+        false => None,
+    };
+    let gateway_local = match gateway_listener.as_ref() {
+        Some(listener) => Some(listener.local_addr()?),
+        None => None,
+    };
     let config = pki.kubeconfig(&endpoint, pki.admin())?;
     write_kubeconfig(&args.write_kubeconfig, &config)?;
     tracing::info!(
@@ -932,6 +970,28 @@ async fn run_server(args: ServerArgs) -> RunResult {
         h3s_controllers::WORKLOAD_GC_ID,
         h3s_controllers::run_workload_gc
     );
+    // ServiceLB and Traefik ship default-on; --disable=traefik,servicelb
+    // takes each out before its client or listener exists.
+    if servicelb_on {
+        let client = client_for(&pki, &endpoint, h3s_controllers::SERVICELB_CONTROLLER_ID).await?;
+        let node_name = node.as_ref().map(|(name, _)| name.clone());
+        children.spawn(supervise("servicelb", move || {
+            h3s_controllers::run_servicelb(client.clone(), node_name.clone())
+        }));
+    }
+    if let Some(listener) = gateway_listener {
+        let client = client_for(&pki, &endpoint, h3s_controllers::TRAEFIK_CONTROLLER_ID).await?;
+        // The listener is non-cloneable; its controller owns it for the server
+        // lifetime. The server shutdown drops it with every other child.
+        children.spawn(async move {
+            if let Err(error) = h3s_controllers::run_traefik(client, listener).await {
+                eprintln!("traefik controller stopped: {error}");
+            }
+        });
+        if let Some(local) = gateway_local {
+            tracing::info!(gateway = %format!("http://{local}"), "h3s traefik listening");
+        }
+    }
     let scheduler = client_for(&pki, &endpoint, h3s_scheduler::SCHEDULER_ID).await?;
     children.spawn(supervise("scheduler", move || {
         let client = scheduler.clone();
@@ -1387,6 +1447,17 @@ mod tests {
         ] {
             assert!(version.contains(pin), "{version}");
         }
+    }
+
+    #[test]
+    fn addons_default_on_and_disable_list_is_strict() {
+        assert_eq!(parse_addons(&[]).unwrap(), (true, true));
+        assert_eq!(
+            parse_addons(&["traefik".to_owned(), "servicelb".to_owned()]).unwrap(),
+            (false, false)
+        );
+        let error = parse_addons(&["typo".to_owned()]).unwrap_err();
+        assert!(error.contains("traefik, servicelb"), "{error}");
     }
 
     #[test]

@@ -56,6 +56,23 @@ pub(crate) async fn cluster(api: &Api) -> Result {
             ]),
         ),
         (
+            "h3s-servicelb",
+            "system:h3s:servicelb",
+            json!([
+                {"apiGroups":[""],"resources":["services"],"verbs":["get","list","watch"]},
+                {"apiGroups":[""],"resources":["services/status"],"verbs":["get","update","patch"]},
+                {"apiGroups":[""],"resources":["nodes"],"verbs":["get","list"]}
+            ]),
+        ),
+        (
+            "h3s-traefik",
+            "system:h3s:traefik",
+            json!([
+                {"apiGroups":["networking.k8s.io"],"resources":["ingresses"],"verbs":["list","watch"]},
+                {"apiGroups":[""],"resources":["services"],"verbs":["list","watch"]}
+            ]),
+        ),
+        (
             "h3s-endpointslice-controller",
             "system:h3s:endpointslice-controller",
             json!([
