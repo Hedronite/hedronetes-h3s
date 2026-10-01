@@ -92,6 +92,9 @@ struct ServerArgs {
     /// Registry backend for this single-server process.
     #[arg(long, default_value = h3s_storage::SqliteStore::DEFAULT_BACKEND, value_parser = parse_store)]
     store: String,
+    /// Seal Secret payloads at rest through Geode custody.
+    #[arg(long)]
+    secrets_encryption: bool,
     /// Human-readable text or one-JSON-object-per-line logs.
     #[arg(long, value_enum, default_value = "text")]
     log_format: LogFormat,
@@ -826,9 +829,26 @@ async fn run_server(args: ServerArgs) -> RunResult {
     } else {
         None
     };
-    let store = std::sync::Arc::new(
-        h3s_storage::SqliteStore::open_backend(&args.store, db_dir.join("h3s.db")).await?,
-    );
+    let store = h3s_storage::SqliteStore::open_backend(&args.store, db_dir.join("h3s.db")).await?;
+    let store = std::sync::Arc::new(if args.secrets_encryption {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                candidates.push(dir.join("geode"));
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(std::path::PathBuf::from(home).join(".cargo/bin/geode"));
+        }
+        let geode = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| input_error("--secrets-encryption requires the geode binary on PATH"))?;
+        let sealer = h3s_storage::GeodeSealer::create(geode, server_dir.join("secrets"))?;
+        store.with_secrets_sealer(sealer)
+    } else {
+        store
+    });
     let api = h3s_apiserver::Api::new(store)
         .await?
         .with_node_cidrs(&args.cluster_cidr, args.node_cidr_mask_size)

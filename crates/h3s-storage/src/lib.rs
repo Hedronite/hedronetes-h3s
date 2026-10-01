@@ -9,7 +9,10 @@ use std::{pin::Pin, time::Duration};
 use async_trait::async_trait;
 use futures_core::Stream;
 
+mod geode;
+
 mod sqlite;
+pub use geode::GeodeSealer;
 pub use sqlite::SqliteStore;
 
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
@@ -17,6 +20,28 @@ pub type ResourceVersion = u64;
 pub type LeaseId = u64;
 pub type Result<T> = std::result::Result<T, Error>;
 pub type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchEvent>> + Send>>;
+
+/// Payload custody hook for Secrets at rest. h3s does not carry a cipher:
+/// implementations delegate to Geode (`geode seal` / `geode open`).
+pub trait SecretsSealer: Send + Sync + 'static {
+    /// Wrap the plaintext payload; the result never contains it.
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>>;
+    /// Undo [`SecretsSealer::seal`]; errors on foreign envelopes.
+    fn open(&self, sealed: &[u8]) -> Result<Vec<u8>>;
+}
+
+/// No custody: Secret payloads stay as written.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Unsealed;
+
+impl SecretsSealer for Unsealed {
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        Ok(plaintext.to_vec())
+    }
+    fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        Ok(sealed.to_vec())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -51,6 +76,8 @@ pub enum Error {
     Database(#[from] rusqlite::Error),
     #[error("registry worker: {0}")]
     Worker(String),
+    #[error("secrets custody: {0}")]
+    Custody(String),
 }
 
 /// `/registry/{resource}/{name}` or `/registry/{resource}/{namespace}/{name}`.

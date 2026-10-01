@@ -12,6 +12,22 @@ use crate::*;
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
+    secrets: Arc<dyn SecretsSealer>,
+}
+
+/// Geode custody envelope marker; mirrors `geode::ENVELOPE`.
+const GEO_ENVELOPE: &[u8] = b"H3SGEO1:";
+
+fn is_secret_key(key: &str) -> bool {
+    key.strip_prefix("/registry/")
+        .is_some_and(|tail| tail.split('/').next() == Some("secrets"))
+}
+
+fn decode_row_value(sealer: &Arc<dyn SecretsSealer>, value: Vec<u8>) -> Result<Vec<u8>> {
+    if value.starts_with(GEO_ENVELOPE) {
+        return sealer.open(&value);
+    }
+    Ok(value)
 }
 
 impl SqliteStore {
@@ -93,6 +109,7 @@ impl SqliteStore {
         .map_err(|e| Error::Worker(e.to_string()))??;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            secrets: Arc::new(Unsealed),
         })
     }
 
@@ -111,12 +128,20 @@ impl SqliteStore {
         .map_err(|e| Error::Worker(e.to_string()))?
     }
 
+    /// Run Secret payloads through custody (Geode) in addition to the
+    /// registry itself. Rows written without an envelope stay readable.
+    pub fn with_secrets_sealer(mut self, sealer: impl SecretsSealer) -> Self {
+        self.secrets = Arc::new(sealer);
+        self
+    }
+
     async fn mutate(
         &self,
         mut obj: StoredObject,
         expected: Option<ResourceVersion>,
         delete: bool,
     ) -> Result<StoredObject> {
+        let sealer = self.secrets.clone();
         self.run(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let previous = get_current(&tx, &obj.key)?;
@@ -140,23 +165,40 @@ impl SqliteStore {
             };
             if delete {
                 obj.value = previous.expect("validated existing object").value;
+            } else if is_secret_key(obj.key.as_str()) {
+                obj.value = sealer.seal(&obj.value)?;
             }
             tx.execute(
                 "UPDATE registry_meta SET revision=revision+1 WHERE singleton=1",
                 [],
             )?;
-            obj.revision = head(&tx)?.0;
+            let new_revision = head(&tx)?.0;
+            let returned_value = if delete {
+                obj.value.clone()
+            } else {
+                decode_row_value(&sealer, obj.value.clone())?
+            };
             tx.execute(
                 "INSERT INTO registry_versions(key,revision,value,kind) VALUES(?1,?2,?3,?4)",
                 params![
                     obj.key.as_str(),
-                    revision_i64(obj.revision)?,
+                    revision_i64(new_revision)?,
                     &obj.value,
                     kind_number(kind)
                 ],
             )?;
             tx.commit()?;
-            Ok(obj)
+            let stored_revision: i64 = connection.query_row(
+                "SELECT revision FROM registry_versions WHERE key=?1 ORDER BY revision DESC LIMIT 1",
+                [obj.key.as_str()],
+                |r| r.get(0),
+            )?;
+            let stored_revision = read_revision_row(stored_revision)?;
+            Ok(StoredObject {
+                revision: stored_revision,
+                value: returned_value,
+                ..obj
+            })
         })
         .await
     }
@@ -166,6 +208,7 @@ impl SqliteStore {
         prefix: String,
         after: ResourceVersion,
     ) -> Result<(Vec<WatchEvent>, ResourceVersion)> {
+        let sealer = self.secrets.clone();
         self.run(move |connection| {
             let tx = connection.transaction()?;
             let (current, floor) = head(&tx)?;
@@ -178,28 +221,38 @@ impl SqliteStore {
                 WHERE v.revision>?1 AND substr(v.key,1,length(?2))=?2 ORDER BY v.revision LIMIT 256",
             )?;
             let rows = statement.query_map(params![revision_i64(after)?, prefix], |r| {
-                let revision = read_revision(r, 1)?;
-                let kind = match r.get::<_, i64>(3)? {
+                let key: String = r.get(0)?;
+                Ok((key, read_revision(r, 1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<i64>>(6)?))
+            })?;
+            let raw = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(statement);
+            drop(tx);
+            let mut events = Vec::with_capacity(raw.len());
+            for (key, revision, value, kind, previous_revision, previous_value, previous_kind) in raw {
+                let previous_revision = match previous_revision {
+                    Some(revision) => Some(u64::try_from(revision).map_err(|_| Error::SchemaVersion(revision))?),
+                    None => None,
+                };
+                let kind = match kind {
                     0 => EventKind::Added,
                     1 => EventKind::Modified,
                     _ => EventKind::Deleted,
                 };
-                let previous = match r.get::<_, Option<i64>>(6)? {
-                    Some(0 | 1) => Some(StoredObject { key: StoreKey(r.get(0)?), revision: read_revision(r,4)?, value:r.get(5)? }),
+                let value = decode_row_value(&sealer, value)?;
+                let previous = match (previous_kind, previous_revision, previous_value) {
+                    (Some(0 | 1), Some(revision), Some(bytes)) => Some(StoredObject {
+                        key: StoreKey(key.clone()),
+                        revision,
+                        value: if is_secret_key(&key) && bytes.starts_with(GEO_ENVELOPE) {
+                            sealer.open(&bytes)?
+                        } else {
+                            bytes
+                        },
+                    }),
                     _ => None,
                 };
-                Ok(WatchEvent {
-                    previous,
-                    kind,
-                    revision,
-                    object: Some(StoredObject {
-                        key: StoreKey(r.get(0)?),
-                        revision,
-                        value: r.get(2)?,
-                    }),
-                })
-            })?;
-            let events = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+                events.push(WatchEvent { previous, kind, revision, object: Some(StoredObject { key: StoreKey(key), revision, value }) });
+            }
             let next = if events.len() == 256 {
                 events.last().expect("full batch").revision
             } else {
@@ -214,6 +267,10 @@ impl SqliteStore {
 fn read_revision(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn read_revision_row(value: i64) -> rusqlite::Result<ResourceVersion> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
 }
 
 fn revision_i64(rev: ResourceVersion) -> Result<i64> {
@@ -281,7 +338,16 @@ fn now_ms() -> Result<i64> {
 impl Storage for SqliteStore {
     async fn get(&self, key: &StoreKey) -> Result<Option<StoredObject>> {
         let key = key.clone();
-        self.run(move |c| get_current(c, &key)).await
+        let sealer = self.secrets.clone();
+        self.run(move |c| {
+            let current = get_current(c, &key)?;
+            current
+                .map(|o| {
+                    decode_row_value(&sealer, o.value).map(|value| StoredObject { value, ..o })
+                })
+                .transpose()
+        })
+        .await
     }
 
     async fn list(&self, sel: ListSelect) -> Result<ObjectList> {
@@ -298,6 +364,7 @@ impl Storage for SqliteStore {
                 "continuation key is outside the selection".into(),
             ));
         }
+        let sealer = self.secrets.clone();
         self.run(move |connection| {
             let tx=connection.transaction()?;
             let (current,floor)=head(&tx)?;
@@ -308,9 +375,12 @@ impl Storage for SqliteStore {
                 AND v.revision=(SELECT MAX(p.revision) FROM registry_versions p WHERE p.key=v.key AND p.revision<=?3)
                 ORDER BY v.key LIMIT ?4")?;
             let rows=statement.query_map(params![sel.prefix,sel.start_after.as_ref().map(StoreKey::as_str).unwrap_or(""),revision_i64(revision)?,(sel.limit+1) as i64], |r| {
-                Ok(StoredObject { key:StoreKey(r.get(0)?),revision:read_revision(r, 1)?,value:r.get(2)? })
+                Ok((StoreKey(r.get(0)?), read_revision(r, 1)?, r.get::<_, Vec<u8>>(2)?))
             })?;
-            let mut items=rows.collect::<std::result::Result<Vec<_>,_>>()?;
+            let raw=rows.collect::<std::result::Result<Vec<_>,_>>()?;
+            drop(statement);
+            drop(tx);
+            let mut items=raw.into_iter().map(|(key,revision,value)| Ok(StoredObject { key, revision, value: decode_row_value(&sealer, value)? })).collect::<Result<Vec<_>>>()?;
             let next_after=if items.len()>sel.limit { items.pop();items.last().map(|x|x.key.clone()) } else { None };
             Ok(ObjectList { items,revision,next_after })
         }).await
