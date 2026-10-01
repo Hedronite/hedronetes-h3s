@@ -128,14 +128,14 @@ kubectl apply -f examples/supported-pod.yaml
 | ClusterIP | yes | IPv4 TCP/UDP nftables proxy |
 | Headless (`clusterIP: None`) | yes | no virtual IP (in development) |
 | ExternalName | yes | no dataplane rules |
-| NodePort / LoadBalancer | not shipped (in development) | — |
+| NodePort / LoadBalancer | LoadBalancer shipped on `20abf97662a0c191ec1ba7ede78820ed9d9c6e02`; NodePort not shipped (in development) | LoadBalancer via ServiceLB; NodePort — |
 
 ## Add-ons
 
-- Flavor follows k3s: optional cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
-- **Shipped today:** `h3s server --disable-agent` runs the control plane + datastore + supervisor without the embedded local agent.
-- **CoreDNS:** in development as the packaged add-on; **not shipped**. The cluster PKI already issues the `system:coredns` client identity, so CoreDNS can be run manually against a lab cluster, but no add-on manager applies it today.
-- **`--disable=`** (k3s-style, comma-separated add-on names): in development; **not shipped** until there are add-ons to disable.
+- Flavor follows k3s: cluster add-ons manifest-managed by the server, each skippable with `--disable=`.
+- **Shipped today:** `h3s server --disable-agent`, and the packaged add-ons **CoreDNS** and **Traefik + ServiceLB** (default-on; `--disable=traefik,servicelb` skips both — see [Shipped](#shipped)).
+- **CoreDNS:** packaged add-on; the cluster PKI issues the `system:coredns` client identity, and the add-on manager applies it on server start.
+- **`--disable=`** (k3s-style, comma-separated add-on names): shipped; see the add-on table in `SPEC.md` §12.
 - **Flannel:** an explicit host daemon (systemd unit via the Nix flake), not a h3s add-on and never a DaemonSet. Run it per node yourself. See [`docs/addons.md`](./docs/addons.md).
 
 ## Platform services (Facet, Geode, HedronDB)
@@ -161,19 +161,19 @@ cargo run -p h3s -- server --help
 cargo run -p h3s -- agent --help
 ```
 
-## Planned
+## Shipped
 
-A line in this README is a build. It stays until the behavior lands.
+Shipped on this line after the `v0.10.0` tag; each row cites the commit that shipped it. This is not a claim that tag `v0.10.0` contains the features.
 
-- **Traefik and ServiceLB.** Packaged add-ons, default-on when built, skipped with `--disable=traefik,servicelb`.
-- **Server-Side Apply.** Field managers, so `kubectl apply --server-side` works when built.
-- **Secrets encryption at rest.** Secret payloads sealed with Geode `seal` / `open`. Facet is the agent path to that vault. h3s does not grow a second cipher.
+- **Traefik and ServiceLB.** Shipped on `20abf97662a0c191ec1ba7ede78820ed9d9c6e02`, merged `1fe27f507fe249b00473f79ae20a1f66870ced88`. Default-on packaged add-ons: a LoadBalancer Service receives an address, an Ingress is served, and `--disable=traefik,servicelb` leaves both off.
+- **Server-Side Apply.** Shipped on `c3fd6b5be3649ee4cea272d699f4f7174502d990`, merged `c76d4f6d87bf1795780af3857dfb21e397c7ffad`. Field managers; `kubectl apply --server-side` works.
+- **Secrets encryption at rest.** Shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc`, merged `beaad03297300a9d84508cedd242163427797247`. Secret payloads sealed with Geode `seal` / `open`; Facet is the agent path to that vault; h3s grows no second cipher.
 
 ## In Development
 
 - Full Kubernetes conformance and durable high availability multi-control-plane (see [Status](#status)).
 - StatefulSet, Job, DaemonSet, and NetworkPolicy in core binary.
-- Ingress, mesh, and GitOps.
+- Ingress via Traefik shipped (see [Shipped](#shipped)); mesh and GitOps in development.
 - Seamless Kubernetes integration.
 
 ## Status

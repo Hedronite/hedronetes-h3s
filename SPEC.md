@@ -503,9 +503,10 @@ HedronDB is not a `--store=` backend. See §2.4.
 - Subresources required for v0.2: `status`, `scale`, `bind`, `eviction`,
   `log`, `exec`, `attach`, `portforward`.
 - OpenAPI v3 discovery.
-- Server-Side Apply with field managers is planned; until that build lands
-  the write path answers apply-patch with 501, and client-side
-  `kubectl apply` works today.
+- Server-Side Apply with field managers shipped on
+  `c3fd6b5be3649ee4cea272d699f4f7174502d990` (merged
+  `c76d4f6d87bf1795780af3857dfb21e397c7ffad`): `kubectl apply --server-side`
+  is supported, alongside client-side `kubectl apply`.
 - Audit log optional.
 
 The API server is the only component that talks to `Storage` for user-visible
@@ -659,8 +660,8 @@ Disable with `--disable=name` or `--disable=name1,name2`.
 | Addon | Default | Notes |
 |---|---|---|
 | coredns | on | Cluster DNS |
-| servicelb | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
-| traefik | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
+| servicelb | on | Shipped on `20abf97662a0c191ec1ba7ede78820ed9d9c6e02`; skipped with `--disable=traefik,servicelb` |
+| traefik | on | Shipped on `20abf97662a0c191ec1ba7ede78820ed9d9c6e02`; skipped with `--disable=traefik,servicelb` |
 | local-storage | on | local-path-provisioner |
 | metrics-server | on | |
 | helm-controller | off until v0.3 | HelmChart CRD, kube-rs implementation |
@@ -765,7 +766,7 @@ Rootless is a phase-3 goal, not v1.
 - kubelet serving certs rotated.
 - Bound SA tokens (no permanent tokens for default SAs).
 - NodeRestriction + node authorizer.
-- Secrets encryption at rest is **planned**: Secret payloads sealed with Geode `seal` / `open` (GDE1) — not a second cipher, and not active until that build lands; Facet is the agent path to that vault. It is not a MUST of the current tag.
+- Secrets encryption at rest shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc` (merged `beaad03297300a9d84508cedd242163427797247`): Secret payloads are sealed with Geode `seal` / `open` (GDE1); Facet is the agent path to that vault; h3s grows no second cipher.
 - Pod Security restricted default for non-system namespaces, configurable.
 - No anonymous write. Anonymous read limited to `/readyz` `/livez` `/version`
   as in upstream.
@@ -827,9 +828,11 @@ system rather than a collection of parts.
   an explicit error until a real backend exists (M2, §16 v1.0.0 scope).
 - Cluster add-ons (CoreDNS) and `--disable=` follow the shape documented
   in [`docs/addons.md`](./docs/addons.md).
-- NodePort, local-path PVC, the documented CoreDNS addon, and bound
-  ServiceAccount tokens ship in this tag. LoadBalancer and the
-  sqlite → etcd upgrade path (`--cluster-init`) stay reserved for v1.0.0.
+- NodePort, local-path PVC, the packaged add-ons (CoreDNS, Traefik,
+  ServiceLB — default-on, skippable with `--disable=traefik,servicelb`),
+  and bound ServiceAccount tokens ship in this line. The
+  sqlite → etcd upgrade path (`--cluster-init`) stays reserved for
+  v1.0.0.
 
 **DoD:** one SQLite server plus agents, `kubectl apply` of the documented
 default Pod reaches Running behind a ClusterIP Service, and killing
@@ -841,9 +844,10 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening still reserved here: NodeRestriction; Server-Side Apply field
-  managers, planned; secrets encryption at rest, planned via Geode
-  `seal` / `open` with Facet as the agent path. Bound ServiceAccount
+- Hardening landing on this line: NodeRestriction; Server-Side Apply field
+  managers shipped on `c3fd6b5be3649ee4cea272d699f4f7174502d990`; secrets
+  encryption at rest shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc`
+  (Geode `seal` / `open`, Facet as the agent path). Bound ServiceAccount
   tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
