@@ -2,7 +2,7 @@
 //! Delete and Pod binding decode their own option objects and commit under
 //! the same admission lock, but never run the resource strategy.
 use crate::{
-    admission, bad, http,
+    admission, authz, bad, http,
     http::Query,
     key, named, node_cidrs, nodes, now, object, patch, pvc,
     resources::{self, Target},
@@ -300,6 +300,7 @@ impl Write<'_> {
                 _ => {}
             }
         }
+        authz::escalation(self.api, self.user, target, self.verb, value).await?;
         nodes::admit(self.user, target, self.verb, value, old)?;
         patch::check_size(value)?;
         if target.resource.kind == "Node" {
