@@ -208,9 +208,10 @@ h3s agent     # kubelet + kube-proxy + CNI + runtime + tunnel client
 
 ### 3.1 Single-server (default)
 
-One host, `h3s server`, embedded SQLite (shipped), embedded agent. This is the laptop,
+One host, `h3s server`, embedded SQLite (shipped default), embedded agent. This is the laptop,
 CI, and appliance path. More than one `h3s server` is a Postgres shape —
-planned, not shipped (§3.3).
+shipped on `512f220de42ed989f937ad7625a7de732247797b` (`--store=postgres`,
+one primary, two servers; not HA; see §3.3).
 
 ```
 ┌─────────────────────────────────────────────┐
