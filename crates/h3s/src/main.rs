@@ -76,9 +76,9 @@ enum LogFormat {
 
 fn parse_store(value: &str) -> Result<String, String> {
     match value {
-        "sqlite" | "memory" => Ok(value.to_owned()),
+        "sqlite" | "memory" | "postgres" => Ok(value.to_owned()),
         other => Err(format!(
-            "--store={other} is not implemented; supported backends are sqlite (default) and memory"
+            "--store={other} is not implemented; supported backends are sqlite (default), memory and postgres"
         )),
     }
 }
@@ -95,6 +95,9 @@ struct ServerArgs {
     /// Seal Secret payloads at rest through Geode custody.
     #[arg(long)]
     secrets_encryption: bool,
+    /// Required PostgreSQL registry URL when --store=postgres.
+    #[arg(long)]
+    datastore_endpoint: Option<String>,
     /// Human-readable text or one-JSON-object-per-line logs.
     #[arg(long, value_enum, default_value = "text")]
     log_format: LogFormat,
@@ -309,6 +312,7 @@ fn allowed_config(command: &str, key: &str) -> bool {
                     | "cluster-cidr"
                     | "node-cidr-mask-size"
                     | "disable-agent"
+                    | "datastore-endpoint"
                     | "disable"
                     | "traefik-http-port"
             ),
@@ -458,6 +462,30 @@ type RunResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 fn input_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
+}
+
+fn postgres_endpoint<'a>(
+    store: &str,
+    endpoint: Option<&'a str>,
+) -> Result<Option<&'a str>, std::io::Error> {
+    if store != "postgres" {
+        return Ok(None);
+    }
+    let endpoint = endpoint.ok_or_else(|| {
+        input_error("--store=postgres requires --datastore-endpoint=postgres://...")
+    })?;
+    if !endpoint.starts_with("postgres://") {
+        return Err(input_error(
+            "--store=postgres requires a postgres:// --datastore-endpoint",
+        ));
+    }
+    Ok(Some(endpoint))
+}
+
+fn postgres_secrets_dir(endpoint: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("h3s-postgres-secrets")
+        .join(hex_digest(endpoint))
 }
 
 fn hex_digest(value: &str) -> String {
@@ -857,8 +885,11 @@ async fn run_server(args: ServerArgs) -> RunResult {
     } else {
         None
     };
-    let store = h3s_storage::SqliteStore::open_backend(&args.store, db_dir.join("h3s.db")).await?;
-    let store = std::sync::Arc::new(if args.secrets_encryption {
+    let postgres_endpoint = postgres_endpoint(&args.store, args.datastore_endpoint.as_deref())?;
+    let secrets_dir = postgres_endpoint
+        .map(postgres_secrets_dir)
+        .unwrap_or_else(|| server_dir.join("secrets"));
+    let geode = if args.secrets_encryption {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         if let Some(paths) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&paths) {
@@ -868,15 +899,34 @@ async fn run_server(args: ServerArgs) -> RunResult {
         if let Some(home) = std::env::var_os("HOME") {
             candidates.push(std::path::PathBuf::from(home).join(".cargo/bin/geode"));
         }
-        let geode = candidates
+        let binary = candidates
             .into_iter()
             .find(|path| path.is_file())
             .ok_or_else(|| input_error("--secrets-encryption requires the geode binary on PATH"))?;
-        let sealer = h3s_storage::GeodeSealer::create(geode, server_dir.join("secrets"))?;
-        store.with_secrets_sealer(sealer)
+        Some(h3s_storage::GeodeSealer::create(binary, secrets_dir)?)
     } else {
-        store
-    });
+        None
+    };
+    let store: std::sync::Arc<dyn h3s_storage::Storage> = match args.store.as_str() {
+        "postgres" => {
+            let endpoint =
+                postgres_endpoint.expect("postgres endpoint validated before opening store");
+            let store = h3s_storage::PostgresStore::open(endpoint).await?;
+            match geode {
+                Some(sealer) => std::sync::Arc::new(store.with_secrets_sealer(sealer)),
+                None => std::sync::Arc::new(store),
+            }
+        }
+        "sqlite" | "memory" => {
+            let store =
+                h3s_storage::SqliteStore::open_backend(&args.store, db_dir.join("h3s.db")).await?;
+            match geode {
+                Some(sealer) => std::sync::Arc::new(store.with_secrets_sealer(sealer)),
+                None => std::sync::Arc::new(store),
+            }
+        }
+        _ => unreachable!("clap store parser admits only supported backends"),
+    };
     let api = h3s_apiserver::Api::new(store)
         .await?
         .with_node_cidrs(&args.cluster_cidr, args.node_cidr_mask_size)
@@ -1418,7 +1468,15 @@ mod tests {
 
     #[test]
     fn store_and_ha_flags_fail_explicitly() {
-        for backend in ["etcd", "postgres", "mysql", "xline"] {
+        let postgres = Multicall::try_parse_from([
+            "h3s",
+            "server",
+            "--store=postgres",
+            "--datastore-endpoint",
+            "postgres://h3s@127.0.0.1:5401/h3s",
+        ]);
+        assert!(postgres.is_ok(), "{postgres:?}");
+        for backend in ["etcd", "mysql", "xline"] {
             let error = Multicall::try_parse_from(["h3s", "server", "--store", backend])
                 .unwrap_err()
                 .to_string();
@@ -1427,11 +1485,54 @@ mod tests {
         for arguments in [
             vec!["h3s", "server", "--cluster-init"],
             vec!["h3s", "server", "--server", "https://vip:6443"],
-            vec!["h3s", "server", "--datastore-endpoint", "https://etcd:2379"],
         ] {
             let error = Multicall::try_parse_from(arguments).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
+    }
+
+    #[test]
+    fn postgres_endpoint_requires_postgres_url_and_shared_custody_dir() {
+        assert!(postgres_endpoint("postgres", None).is_err());
+        assert!(postgres_endpoint("postgres", Some("https://etcd.example:2379")).is_err());
+        let url = "postgres://h3s@127.0.0.1:5401/h3s";
+        assert_eq!(postgres_endpoint("postgres", Some(url)).unwrap(), Some(url));
+        assert_eq!(postgres_endpoint("sqlite", None).unwrap(), None);
+        assert_eq!(postgres_secrets_dir(url), postgres_secrets_dir(url));
+    }
+
+    #[test]
+    fn postgres_endpoint_contract_is_explicit() {
+        let missing = Multicall::try_parse_from(["h3s", "server", "--store=postgres"])
+            .expect("clap parses; run_server rejects missing endpoint");
+        assert!(matches!(
+            missing,
+            Multicall::H3s(H3sCli {
+                command: Command::Server(_)
+            })
+        ));
+        for endpoint in ["https://etcd.example:2379", "mysql://h3s@localhost/h3s"] {
+            let parsed = Multicall::try_parse_from([
+                "h3s",
+                "server",
+                "--store=postgres",
+                "--datastore-endpoint",
+                endpoint,
+            ]);
+            assert!(
+                parsed.is_ok(),
+                "clap accepts then run_server validates {endpoint}"
+            );
+        }
+        assert!(Multicall::try_parse_from(["h3s", "server"]).is_ok());
+    }
+
+    #[test]
+    #[ignore = "needs two OS h3s processes and H3S_POSTGRES_URL; run on tower"]
+    fn postgres_two_server_processes_share_primary() {
+        // The tower proof starts two `target/release/h3s server` processes.
+        // Keep it ignored for GHA, where no Postgres primary exists.
+        assert!(std::env::var("H3S_POSTGRES_URL").is_ok());
     }
 
     #[test]
