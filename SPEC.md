@@ -503,8 +503,9 @@ HedronDB is not a `--store=` backend. See §2.4.
 - Subresources required for v0.2: `status`, `scale`, `bind`, `eviction`,
   `log`, `exec`, `attach`, `portforward`.
 - OpenAPI v3 discovery.
-- Server-Side Apply is unsupported in this tag; stock `kubectl apply`
-  (client-side, three-way merge) is the supported write path.
+- Server-Side Apply with field managers is planned; until that build lands
+  the write path answers apply-patch with 501, and client-side
+  `kubectl apply` works today.
 - Audit log optional.
 
 The API server is the only component that talks to `Storage` for user-visible
@@ -658,8 +659,8 @@ Disable with `--disable=name` or `--disable=name1,name2`.
 | Addon | Default | Notes |
 |---|---|---|
 | coredns | on | Cluster DNS |
-| servicelb | off | Not shipped in this tag; not k3s addon parity |
-| traefik | off | Not shipped in this tag; not k3s addon parity |
+| servicelb | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
+| traefik | on, planned | To be built; default-on when built; skipped with `--disable=traefik,servicelb` |
 | local-storage | on | local-path-provisioner |
 | metrics-server | on | |
 | helm-controller | off until v0.3 | HelmChart CRD, kube-rs implementation |
@@ -764,6 +765,7 @@ Rootless is a phase-3 goal, not v1.
 - kubelet serving certs rotated.
 - Bound SA tokens (no permanent tokens for default SAs).
 - NodeRestriction + node authorizer.
+- Secrets encryption at rest is **planned**: Secret payloads sealed with Geode `seal` / `open` (GDE1) — not a second cipher, and not active until that build lands; Facet is the agent path to that vault. It is not a MUST of the current tag.
 - Pod Security restricted default for non-system namespaces, configurable.
 - No anonymous write. Anonymous read limited to `/readyz` `/livez` `/version`
   as in upstream.
@@ -839,8 +841,10 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening still reserved here: NodeRestriction, Server-Side Apply,
-  secrets encryption. Bound ServiceAccount tokens shipped in v0.10.0.
+- Hardening still reserved here: NodeRestriction; Server-Side Apply field
+  managers, planned; secrets encryption at rest, planned via Geode
+  `seal` / `open` with Facet as the agent path. Bound ServiceAccount
+  tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
 - musl static release binaries, amd64 + arm64; documented backup /
@@ -1013,7 +1017,7 @@ Rule used throughout: **ideas and interfaces, not git subtrees.**
 | Supervisor tunnel so kubelet `:10250` is localhost-only | runc as the default OCI runtime |
 | Manifests directory auto-deploy (AddOns) | In-tree cloud providers and volume plugins |
 | Ports 6443 / 10250 / 2379, data-dir layout philosophy | GOGC as the memory story |
-| Packaged CoreDNS, local-path, metrics-server, Flannel | The k3s launcher wrapping `kube-apiserver` |
+| Packaged CoreDNS, local-path, metrics-server, ServiceLB, Traefik, Flannel | The k3s launcher wrapping `kube-apiserver` |
 
 k3s is the UX and packaging contract. It is not the implementation.
 
