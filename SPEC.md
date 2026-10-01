@@ -333,9 +333,9 @@ in this table are required defaults.
 
 | Crate | Backend |
 |---|---|
-| `rusqlite` or `sqlx` (sqlite) | One server (shipped) |
-| `sqlx` (postgres) | More than one server — planned, not shipped |
-| `sqlx` (mysql) | Not implemented |
+| `rusqlite` (sqlite) | One server (shipped) |
+| `tokio-postgres` | More than one server — planned, not shipped; no crate added until that build lands |
+| — (none) | MySQL: not implemented |
 | `etcd-client` | Not implemented |
 | Xline client | Not implemented |
 
