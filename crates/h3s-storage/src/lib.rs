@@ -9,6 +9,8 @@ use std::{pin::Pin, time::Duration};
 use async_trait::async_trait;
 use futures_core::Stream;
 
+pub mod backup;
+
 mod geode;
 
 mod postgres;
