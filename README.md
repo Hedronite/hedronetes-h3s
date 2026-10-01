@@ -28,7 +28,7 @@ Status: **0.11.0** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd
 
 ## What this is
 
-- A **Kubernetes-compatible** distribution: `h3s server` / `h3s agent`, SQLite by default, stock `kubectl` and Helm against a focused API surface.
+- A **Kubernetes-compatible** distribution: `h3s server` / `h3s agent`, stock `kubectl` and Helm against a focused API surface. One `h3s server` runs on SQLite (shipped). More than one `h3s server` runs on Postgres — **planned**, not shipped. etcd, MySQL, and Xline are not implemented. `h3s agent` has no datastore.
 - Control plane and kubelet path are **native Rust** (no embedded Go Kubernetes).
 - **Complement posture:** run h3s as an **agentic node / pool inside a larger Kubernetes cluster** (EKS/GKE/…) **or** as its own small cluster for lab and CI. Same product; different seat.
 
@@ -152,7 +152,7 @@ Agents reach them via normal Services and workload identity; platform durability
 
 ```text
 h3s server   # control plane + datastore + supervisor (+ embedded agent)
-h3s agent    # kubelet + kube-proxy + CNI + runtime + tunnel client
+h3s agent    # kubelet + kube-proxy + CNI + runtime + tunnel client (no datastore)
 ```
 
 ```bash
@@ -178,7 +178,7 @@ These three ship in tag `v0.11.0`. They were not in tag `v0.10.0`. Each row cite
 
 ## Status
 
-**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). **v0.10.0** is the k3s-shaped single-server release: default Pods, bound ServiceAccount tokens, ClusterIP and NodePort, local-path PVC, and an API that survives controller death. One SQLite server. Not HA. **v0.11.0** adds Server-Side Apply, opt-in Geode secrets encryption, and default-on Traefik and ServiceLB. Further stress testing is still needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
+**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). **v0.10.0** is the k3s-shaped single-server release: default Pods, bound ServiceAccount tokens, ClusterIP and NodePort, local-path PVC, and an API that survives controller death. One SQLite server. Not HA. **v0.11.0** adds Server-Side Apply, opt-in Geode secrets encryption, and default-on Traefik and ServiceLB. Store posture: one `h3s server` uses SQLite (shipped); more than one `h3s server` uses Postgres (**planned, not shipped**); etcd, MySQL, and Xline stay not implemented; `h3s agent` has no datastore. Jev, HedronDB, and pgvector are companion products, not h3s store features. Further stress testing is still needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
 
 A multi-node h3s cluster — native `server` + separate `agent` — runs workloads with stock `kubectl` and Helm. Proven on Colima VMs running NixOS, Debian, and Fedora.
 
