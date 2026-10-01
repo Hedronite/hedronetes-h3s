@@ -18,6 +18,10 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 pub mod private;
 
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+/// The persisted cluster bundle inside the PKI directory.
+const BUNDLE: &str = "cluster-pki.json";
+/// A serving certificate is replaced this long before it expires.
+pub const SERVING_RENEWAL_WINDOW: Duration = Duration::days(30);
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +116,39 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 impl ClusterPki {
+    /// Replace the serving certificate when it expires inside
+    /// [`SERVING_RENEWAL_WINDOW`], keeping the CA certificate byte for byte.
+    ///
+    /// Called by the server entry point before the listener is built. The
+    /// replacement carries the caller's current serving names and a fresh key;
+    /// an administrator, node or client certificate is never touched.
+    pub fn renew_serving_certificate_if_expiring(
+        directory: &Path,
+        server_names: &[String],
+    ) -> Result<bool> {
+        private_directory(directory)?;
+        let _lock = bundle_lock(directory)?;
+        let path = directory.join(BUNDLE);
+        if !path.try_exists()? {
+            return Ok(false);
+        }
+        let mut pki = Self::load(&path, server_names)?;
+        if pki.server.not_after()? > OffsetDateTime::now_utc() + SERVING_RENEWAL_WINDOW {
+            return Ok(false);
+        }
+        let issuer = pki.issuer()?;
+        pki.server = issue(
+            &issuer,
+            "h3s-apiserver",
+            None,
+            server_names,
+            ExtendedKeyUsagePurpose::ServerAuth,
+        )?;
+        pki.validate(server_names)?;
+        pki.persist(directory)?;
+        Ok(true)
+    }
+
     /// Corrupt, expired, insecure or incompatible existing material fails closed.
     /// A valid legacy serving leaf missing AKI is reissued atomically under a
     /// bundle lock, preserving CA, private key, subject, SANs and expiry. Other
@@ -121,17 +158,12 @@ impl ClusterPki {
         // Serialize creation and the narrowly scoped legacy serving-cert repair.
         // The separate lock inode is stable across atomic bundle replacement.
         let _lock = bundle_lock(directory)?;
-        let path = directory.join("cluster-pki.json");
+        let path = directory.join(BUNDLE);
         if path.try_exists()? {
             let mut pki = Self::load(&path, server_names)?;
             if pki.repair_legacy_serving_certificate()? {
                 pki.validate(server_names)?;
-                let mut tmp = tempfile::NamedTempFile::new_in(directory)?;
-                serde_json::to_writer(tmp.as_file_mut(), &pki)?;
-                tmp.as_file_mut().write_all(b"\n")?;
-                tmp.as_file().sync_all()?;
-                tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-                fs::File::open(directory)?.sync_all()?;
+                pki.persist(directory)?;
             }
             return Ok(pki);
         }
@@ -268,6 +300,17 @@ impl ClusterPki {
         let key = KeyPair::from_pem(&self.server.private_key_pem)?;
         self.server.certificate_pem = params.signed_by(&key, &self.issuer()?)?.pem();
         Ok(true)
+    }
+    /// Write the bundle atomically under the caller's bundle lock.
+    fn persist(&self, directory: &Path) -> Result<()> {
+        let path = directory.join(BUNDLE);
+        let mut tmp = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer(tmp.as_file_mut(), self)?;
+        tmp.as_file_mut().write_all(b"\n")?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+        fs::File::open(directory)?.sync_all()?;
+        Ok(())
     }
     fn issuer(&self) -> Result<Issuer<'static, KeyPair>> {
         Ok(Issuer::from_ca_cert_pem(
@@ -627,4 +670,69 @@ pub fn kubelet_server_config(
         .with_safe_default_protocol_versions()?
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(vec![der], identity.private_key_der()?)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn fingerprint(pki: &ClusterPki) -> String {
+        format!("{:x}", Sha256::digest(pki.ca.certificate_pem.as_bytes()))
+    }
+
+    /// KP-34: a serving leaf inside the renewal window is replaced with a fresh
+    /// one, and the CA certificate and its key stay byte for byte the same.
+    #[test]
+    fn serving_certificate_is_renewed_inside_the_window_and_only_then() {
+        let directory = tempfile::tempdir().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let names = vec!["localhost".to_string(), "192.168.104.4".to_string()];
+        let mut pki = ClusterPki::open_or_create(directory.path(), &names).unwrap();
+        let ca = fingerprint(&pki);
+        let ca_key = pki.ca.private_key_pem.clone();
+        // Age the serving certificate: the same CA, a leaf that lapses in ten
+        // days. Nothing else about the bundle changes.
+        let issuer = pki.issuer().unwrap();
+        pki.server = issue_with_lifetime(
+            &issuer,
+            "h3s-apiserver",
+            None,
+            &names,
+            ExtendedKeyUsagePurpose::ServerAuth,
+            Duration::days(10),
+        )
+        .unwrap();
+        pki.persist(directory.path()).unwrap();
+        let aged_pem = pki.server.certificate_pem().to_owned();
+        let aged_not_after = pki.server.not_after().unwrap();
+
+        assert!(
+            ClusterPki::renew_serving_certificate_if_expiring(directory.path(), &names).unwrap()
+        );
+        let renewed = ClusterPki::open_or_create(directory.path(), &names).unwrap();
+        assert_ne!(renewed.server.certificate_pem(), aged_pem, "leaf replaced");
+        let moved = renewed.server.not_after().unwrap();
+        assert!(
+            moved > aged_not_after + Duration::days(300),
+            "leaf must gain a full lifetime: {moved} after {aged_not_after}"
+        );
+        assert_eq!(fingerprint(&renewed), ca, "CA certificate unchanged");
+        assert_eq!(renewed.ca.private_key_pem, ca_key, "CA key unchanged");
+        renewed.validate(&names).unwrap();
+
+        // A certificate outside the window is left exactly as it is.
+        assert!(
+            !ClusterPki::renew_serving_certificate_if_expiring(directory.path(), &names).unwrap()
+        );
+        let again = ClusterPki::open_or_create(directory.path(), &names).unwrap();
+        assert_eq!(
+            again.server.certificate_pem(),
+            renewed.server.certificate_pem()
+        );
+        assert_eq!(fingerprint(&again), ca);
+    }
 }

@@ -775,10 +775,9 @@ async fn run_server(args: ServerArgs) -> RunResult {
     sans.extend(args.tls_san);
     sans.sort();
     sans.dedup();
-    let pki = std::sync::Arc::new(h3s_certs::ClusterPki::open_or_create(
-        &server_dir.join("tls"),
-        &sans,
-    )?);
+    let tls_dir = server_dir.join("tls");
+    h3s_certs::ClusterPki::renew_serving_certificate_if_expiring(&tls_dir, &sans)?;
+    let pki = std::sync::Arc::new(h3s_certs::ClusterPki::open_or_create(&tls_dir, &sans)?);
     let token = read_token(
         args.token.as_ref(),
         args.token_file.as_deref(),
