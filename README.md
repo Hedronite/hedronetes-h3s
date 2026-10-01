@@ -37,6 +37,9 @@ Status: **0.10.0** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd
 - **Not** “rip out EKS/GKE and move to h3s.”
 - **Not** a claim of full Kubernetes conformance (see [Implemented API](#implemented-api); StatefulSet/Job/PVC/NetworkPolicy still out).
 - **Not** federation-as-default (optional enterprise packaging later — not the default install story).
+- **Not** k3s addon parity: Traefik and ServiceLB are **default-off and not shipped** in this tag.
+- **Not** Server-Side Apply: unsupported in this tag — `kubectl apply --server-side` is not claimed to work.
+- **Not** secrets encryption at rest: Secret payloads are not encrypted at rest in this tag.
 
 ## How EKS/GKE teams use it
 
