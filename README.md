@@ -1,6 +1,6 @@
 # Hedronetes (h3s)
 
-> **Status:** In production use as daily-driver / dogfood agentic node beside K8s/k3s (v0.11.0). Hardening: further stress testing before broad production recommend; durable HA + conformance targeted for v1.0.0. Not a toy reference.
+> **Status:** In production use as daily-driver / dogfood agentic node beside K8s/k3s (v0.11.0). Hardening: further stress testing before broad production recommend; durable HA (leader election, automatic failover — the two-server Postgres store already ships) + conformance targeted for v1.0.0. Not a toy reference.
 
 
 <p align="center">
@@ -28,7 +28,7 @@ Status: **0.11.0** · Apache-2.0 · API target Kubernetes **v1.34** · Linux amd
 
 ## What this is
 
-- A **Kubernetes-compatible** distribution: `h3s server` / `h3s agent`, stock `kubectl` and Helm against a focused API surface. One `h3s server` runs on SQLite (shipped). More than one `h3s server` runs on Postgres — **planned**, not shipped. etcd, MySQL, and Xline are not implemented. `h3s agent` has no datastore.
+- A **Kubernetes-compatible** distribution: `h3s server` / `h3s agent`, stock `kubectl` and Helm against a focused API surface. One `h3s server` runs on SQLite (shipped default). More than one `h3s server` shares one Postgres primary via `--store=postgres` (shipped on `512f220de42ed989f937ad7625a7de732247797b`; `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`). etcd, MySQL, and Xline are not implemented. `h3s agent` has no datastore.
 - Control plane and kubelet path are **native Rust** (no embedded Go Kubernetes).
 - **Complement posture:** run h3s as an **agentic node / pool inside a larger Kubernetes cluster** (EKS/GKE/…) **or** as its own small cluster for lab and CI. Same product; different seat.
 
@@ -163,11 +163,13 @@ cargo run -p h3s -- agent --help
 
 ## Shipped
 
-These three ship in tag `v0.11.0`. They were not in tag `v0.10.0`. Each row cites the commit that shipped the behavior.
+The first three ship in tag `v0.11.0`. They were not in tag `v0.10.0`. The store rows land on the postgres line after `v0.11.0`; they are not a tag claim. Each row cites the commit that shipped the behavior.
 
 - **Traefik and ServiceLB.** Shipped on `20abf97662a0c191ec1ba7ede78820ed9d9c6e02`, merged `1fe27f507fe249b00473f79ae20a1f66870ced88`. Default-on packaged add-ons: a LoadBalancer Service receives an address, an Ingress is served, and `--disable=traefik,servicelb` leaves both off.
 - **Server-Side Apply.** Shipped on `c3fd6b5be3649ee4cea272d699f4f7174502d990`, merged `c76d4f6d87bf1795780af3857dfb21e397c7ffad`. Field managers; `kubectl apply --server-side` works.
 - **Secrets encryption at rest.** Shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc`, merged `beaad03297300a9d84508cedd242163427797247`. Secret payloads sealed with Geode `seal` / `open`; Facet is the agent path to that vault; h3s grows no second cipher.
+- **Multi-server Postgres store.** `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`: a revision, conflict on a stale `resourceVersion`, watch resume, compaction failing the old watch, and a Geode seal whose plaintext is absent from a raw SQL read and returned by `open`.
+- **`--store=postgres`.** Shipped on `512f220de42ed989f937ad7625a7de732247797b`: requires `--datastore-endpoint` with a `postgres://` URL and talks to one Postgres primary; two `h3s server` processes share it — a create on the first is read on the second. SQLite stays the one-server default. `--secrets-encryption` on that store uses the existing Geode sealer. etcd, MySQL, and Xline are not implemented; `h3s agent` has no datastore.
 
 ## In Development
 
@@ -178,7 +180,7 @@ These three ship in tag `v0.11.0`. They were not in tag `v0.10.0`. Each row cite
 
 ## Status
 
-**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). **v0.10.0** is the k3s-shaped single-server release: default Pods, bound ServiceAccount tokens, ClusterIP and NodePort, local-path PVC, and an API that survives controller death. One SQLite server. Not HA. **v0.11.0** adds Server-Side Apply, opt-in Geode secrets encryption, and default-on Traefik and ServiceLB. Store posture: one `h3s server` uses SQLite (shipped); more than one `h3s server` uses Postgres (**planned, not shipped**); etcd, MySQL, and Xline stay not implemented; `h3s agent` has no datastore. Jev, HedronDB, and pgvector are companion products, not h3s store features. Further stress testing is still needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
+**v0.9.0** is the first release that actually runs a cluster. **v0.9.1** is the structure substrate (split API dispatch, one PodRuntimeProfile, restarting supervisor). **v0.10.0** is the k3s-shaped single-server release: default Pods, bound ServiceAccount tokens, ClusterIP and NodePort, local-path PVC, and an API that survives controller death. One SQLite server. Not HA. **v0.11.0** adds Server-Side Apply, opt-in Geode secrets encryption, and default-on Traefik and ServiceLB. Store posture: one `h3s server` uses SQLite (shipped default); more than one `h3s server` shares one Postgres primary with `--store=postgres` plus `--datastore-endpoint` (shipped on `512f220de42ed989f937ad7625a7de732247797b`; `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`); `--secrets-encryption` on that store seals Secret payloads with Geode; etcd, MySQL, and Xline stay not implemented; `h3s agent` has no datastore. Jev, HedronDB, and pgvector are companion products, not h3s store features. Further stress testing is still needed before recommending it for production despite internal use. **Durable high availability with Kubernetes conformance ships with v1.0.0.**
 
 A multi-node h3s cluster — native `server` + separate `agent` — runs workloads with stock `kubectl` and Helm. Proven on Colima VMs running NixOS, Debian, and Fedora.
 
