@@ -66,6 +66,41 @@ enum Command {
     Agent(AgentArgs),
     /// Inspect the configured local CRI v1 runtime without changing workloads.
     RuntimeInfo(RuntimeArgs),
+    /// Rotate the server join token offline.
+    Token(TokenArgs),
+    /// Copy the durable registry and server identity offline.
+    Backup(BackupArgs),
+    /// Restore a durable registry and server identity offline.
+    Restore(RestoreArgs),
+}
+#[derive(Debug, Args)]
+struct TokenArgs {
+    #[command(subcommand)]
+    command: TokenCommand,
+}
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    /// Replace server/node-token with one new token.
+    Rotate(DurabilityArgs),
+}
+#[derive(Debug, Args)]
+struct DurabilityArgs {
+    #[arg(long)]
+    data_dir: std::path::PathBuf,
+}
+#[derive(Debug, Args)]
+struct BackupArgs {
+    #[arg(long)]
+    data_dir: std::path::PathBuf,
+    #[arg(long)]
+    output: std::path::PathBuf,
+}
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    #[arg(long)]
+    data_dir: std::path::PathBuf,
+    #[arg(long)]
+    from: std::path::PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -450,6 +485,9 @@ fn command_log_format(command: &Multicall) -> LogFormat {
             command: Command::RuntimeInfo(args),
         })
         | Multicall::RuntimeInfo(args) => args.log_format,
+        Multicall::H3s(H3sCli {
+            command: Command::Token(_) | Command::Backup(_) | Command::Restore(_),
+        }) => LogFormat::Text,
     }
 }
 
@@ -1197,6 +1235,108 @@ fn read_token(
     }
     Ok(text)
 }
+fn copy_regular(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    replace: bool,
+) -> RunResult {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{} must be a regular file", source.display()).into());
+    }
+    if destination.try_exists()? {
+        if !replace {
+            return Err(format!("{} already exists", destination.display()).into());
+        }
+        std::fs::remove_file(destination)?;
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(source, destination)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    Ok(())
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> RunResult {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("{} must be a real directory", source.display()).into());
+    }
+    std::fs::create_dir_all(destination)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source = entry.path();
+        let destination = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source)?;
+        if metadata.is_dir() {
+            copy_tree(&source, &destination)?;
+        } else {
+            copy_regular(&source, &destination, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn rotate_token(args: DurabilityArgs) -> RunResult {
+    let server = args.data_dir.join("server");
+    let _registry = h3s_certs::private::exclusive_process_lock(&server.join("db/.registry.lock"))?;
+    let _token_lock = h3s_certs::private::exclusive_process_lock(&server.join(".node-token.lock"))?;
+    let ca = String::from_utf8(h3s_certs::private::read(
+        &server.join("ca.crt"),
+        1024 * 1024,
+    )?)?;
+    let secret =
+        h3s_auth::bootstrap::random_secret().map_err(|_| "secure random source unavailable")?;
+    let token = secure_token(&ca, &secret);
+    if !h3s_auth::bootstrap::valid_token(&token) {
+        return Err("rotated token failed validation".into());
+    }
+    h3s_certs::private::write(&server.join("node-token"), token.as_bytes(), true)?;
+    println!("{token}");
+    Ok(())
+}
+
+fn backup(args: BackupArgs) -> RunResult {
+    let server = args.data_dir.join("server");
+    let _registry = h3s_certs::private::exclusive_process_lock(&server.join("db/.registry.lock"))?;
+    h3s_storage::backup::backup(&args.data_dir, &args.output)?;
+    copy_tree(&server.join("tls"), &args.output.join("server/tls"))?;
+    copy_regular(
+        &server.join("ca.crt"),
+        &args.output.join("server/ca.crt"),
+        false,
+    )?;
+    copy_regular(
+        &server.join("node-token"),
+        &args.output.join("server/node-token"),
+        false,
+    )?;
+    Ok(())
+}
+
+fn restore(args: RestoreArgs) -> RunResult {
+    let server = args.data_dir.join("server");
+    let _registry = h3s_certs::private::exclusive_process_lock(&server.join("db/.registry.lock"))?;
+    h3s_storage::backup::restore(&args.data_dir, &args.from)?;
+    let source_server = args.from.join("server");
+    let tls = server.join("tls");
+    if tls.try_exists()? {
+        std::fs::remove_dir_all(&tls)?;
+    }
+    copy_tree(&source_server.join("tls"), &tls)?;
+    copy_regular(&source_server.join("ca.crt"), &server.join("ca.crt"), true)?;
+    copy_regular(
+        &source_server.join("node-token"),
+        &server.join("node-token"),
+        true,
+    )?;
+    Ok(())
+}
+
 async fn run_agent(args: AgentArgs) -> RunResult {
     let cluster_dns = args
         .cluster_dns
@@ -1237,6 +1377,11 @@ async fn run_command(command: Command) -> RunResult {
         Command::Server(args) => run_server(args).await,
         Command::Agent(args) => run_agent(args).await,
         Command::RuntimeInfo(args) => runtime_info(args).await,
+        Command::Token(TokenArgs {
+            command: TokenCommand::Rotate(args),
+        }) => rotate_token(args),
+        Command::Backup(args) => backup(args),
+        Command::Restore(args) => restore(args),
     }
 }
 #[tokio::main]
