@@ -238,10 +238,11 @@ shipped on `512f220de42ed989f937ad7625a7de732247797b`; the
 `PostgresStore` driver is `tokio-postgres`, shipped on
 `174367d34e643b78a3e5a654b02e460de5ada3bf`. Two `h3s server` processes
 can share that primary; a create on the first is read on the second.
-This is not the HA milestone: no Raft, no read replica, no automatic
-failover, and etcd/MySQL/Xline are not implemented. Agents join a fixed
-registration address (VIP or load balancer) on `:6443`. After join, each
-agent learns the current apiserver endpoint list and load-balances.
+This is not the HA milestone: no Raft, no leader election, no read
+replica, no automatic failover, and etcd/MySQL/Xline are not
+implemented. Agents join a fixed registration address (VIP or load
+balancer) on `:6443`. After join, each agent learns the current
+apiserver endpoint list and load-balances.
 
 SQLite **MUST NOT** be used with more than one server. Same rule as k3s.
 `h3s agent` has no datastore: agents hold no registry state; all reads
@@ -262,8 +263,8 @@ and writes go through the API server.
 - Shared cluster token at `/var/lib/hedronetes/server/node-token`.
 - Separate `--agent-token` MAY exist so agents cannot join as servers.
 - `--cluster-init` is not implemented; multi-server setup is `--store=postgres` + `--datastore-endpoint` (shipped on `512f220de42ed989f937ad7625a7de732247797b`).
-- Subsequent servers: `h3s server --store=postgres --datastore-endpoint postgres://… --server https://vip:6443 --token …` (shipped; two servers can share one primary)
-- Agents: `h3s agent --server https://vip:6443 --token …` (shipped; the agent has no datastore)
+- Additional servers point at the same Postgres primary: `h3s server --store=postgres --datastore-endpoint postgres://…` (shipped; two servers can share one primary). Registration through a fixed `--server https://vip:6443` address is **planned, not shipped** — no VIP/load-balancer join exists yet.
+- Agents: `h3s agent --server https://vip:6443 --token …` (shipped agent join; the agent has no datastore)
 - Node password / NodeRestriction as in k3s/Kubernetes.
 
 ---
@@ -721,9 +722,10 @@ curl -sfL https://get.hedronetes.dev | sh -
 # single node
 h3s server
 
-# HA — shipped: two or more servers on one Postgres primary (`--store=postgres --datastore-endpoint postgres://…`); etcd, MySQL, Xline not implemented
+# multi-server store — shipped, not HA: two servers on one Postgres primary
+# (`--store=postgres --datastore-endpoint postgres://…`); etcd, MySQL, Xline not implemented
 h3s server --store=postgres --datastore-endpoint postgres://registry:5432/h3s
-h3s server --store=postgres --datastore-endpoint postgres://registry:5432/h3s --server https://vip:6443 --token "$TOKEN"
+h3s server --store=postgres --datastore-endpoint postgres://registry:5432/h3s --token "$TOKEN"
 
 # worker
 h3s agent --server https://vip:6443 --token "$TOKEN"
@@ -819,7 +821,7 @@ second versioning axis.
 | **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
 | **v0.10.0** (shipped, tag) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods, bound tokens, ClusterIP and NodePort, local-path PVC | the remainder of “v0.2 — k3s-shaped” that holds without HA |
 | **v0.11.0** (shipped, tag) | Server-Side Apply, opt-in Geode secrets encryption, default-on Traefik and ServiceLB | the three behaviors restored after the contract strike; not the HA milestone |
-| **postgres line** (on `feat/postgres`, merged `8bae4b55c48e0e46303a1e01310713b551970f2a`) | Multi-server store: `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`; `--store=postgres` one-primary, two-server shared, Geode-sealed on `512f220de42ed989f937ad7625a7de732247797b` | the store half of “v0.3 — HA and hardening”, before the HA milestone |
+| **postgres line** (on `feat/postgres`, merged `8bae4b55c48e0e46303a1e01310713b551970f2a`) | Multi-server store, **not the HA milestone**: `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`; `--store=postgres` one-primary, two-server shared, Geode-sealed on `512f220de42ed989f937ad7625a7de732247797b` | the store half of “v0.3 — HA and hardening”; the HA half stays reserved |
 | **v1.0.0** (reserved) | **M2** — HA milestone: Raft/leader election, automatic failover, security MUSTs, official conformance (not the Postgres store itself; etcd/MySQL/Xline not implemented) | the rest of “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
 ### v0.9.0 — M1 subset (shipped)
