@@ -1,8 +1,9 @@
 //! Authorization: the RBAC snapshot, then node-scoped grants for resource
 //! requests that RBAC alone does not allow.
-use crate::{nodes, resources::Target, selectors::Selection, Api, Failure, Result};
+use crate::{key, nodes, object, resources::Target, selectors::Selection, Api, Failure, Result};
 use h3s_auth::{Rbac, Request as AuthRequest, ResourceRequest, User};
 use h3s_storage::ListSelect;
+use serde_json::Value;
 
 impl Api {
     pub(crate) async fn rbac(&self) -> Result<Rbac> {
@@ -139,14 +140,155 @@ pub(crate) async fn resource(
             ));
         }
     }
-    if target.resource.group == "rbac.authorization.k8s.io"
-        && ["create", "update", "patch", "delete"].contains(&verb)
-        && !user.is_superuser()
-    {
-        return Err(Failure::new(403,"Forbidden","RBAC mutations require the bootstrap administrator until escalation checks are implemented"));
-    }
     Ok(Grant {
         selection,
         read_guard,
     })
+}
+
+/// The RBAC API group these objects live in.
+const RBAC_GROUP: &str = "rbac.authorization.k8s.io";
+
+/// The permissions a rule set grants, one entry per (verb, group, resource,
+/// resource name). `*` stays literal: a principal holds only what its own
+/// rules match, so a rule granting `*` is a grant the principal must already
+/// have to pass it on.
+fn granted(rules: &Value) -> Vec<(String, String, String, Option<String>)> {
+    let list = |value: &Value| -> Option<Vec<String>> {
+        value.as_array().map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+    };
+    let mut out = Vec::new();
+    for rule in rules.as_array().into_iter().flatten() {
+        let groups = list(&rule["apiGroups"]).unwrap_or_else(|| vec![String::new()]);
+        let resources = list(&rule["resources"]).unwrap_or_default();
+        let verbs = list(&rule["verbs"]).unwrap_or_default();
+        let names: Vec<Option<String>> = match list(&rule["resourceNames"]) {
+            Some(names) if !names.is_empty() => names.into_iter().map(Some).collect(),
+            _ => vec![None],
+        };
+        for verb in &verbs {
+            for group in &groups {
+                for resource in &resources {
+                    for name in &names {
+                        out.push((verb.clone(), group.clone(), resource.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+fn request<'a>(
+    verb: &'a str,
+    group: &'a str,
+    resource: &'a str,
+    subresource: Option<&'a str>,
+    namespace: Option<&'a str>,
+    name: Option<&'a str>,
+) -> ResourceRequest<'a> {
+    ResourceRequest {
+        verb,
+        group,
+        resource,
+        subresource,
+        namespace,
+        name,
+    }
+}
+fn escalation_denied(what: &str) -> Failure {
+    Failure::new(
+        403,
+        "Forbidden",
+        format!("user cannot grant permissions it does not hold: {what}"),
+    )
+}
+fn split_resource(resource: &str) -> (&str, Option<&str>) {
+    match resource.split_once('/') {
+        Some((resource, subresource)) => (resource, Some(subresource)),
+        None => (resource, None),
+    }
+}
+/// Kubernetes escalation prevention: a principal may create or change an RBAC
+/// object only within what it already holds, unless it may `escalate` that
+/// object kind. A binding asks the same question about the role it references,
+/// unless the principal may `bind` that role. A bootstrap administrator is
+/// unaffected, so cluster bootstrap still works.
+pub(crate) async fn escalation(
+    api: &Api,
+    user: &User,
+    target: &Target,
+    verb: &str,
+    value: &Value,
+) -> Result<()> {
+    if user.is_superuser() || !matches!(verb, "create" | "update" | "patch") {
+        return Ok(());
+    }
+    let rbac = api.rbac().await?;
+    let namespace = target.namespace.as_deref().filter(|n| !n.is_empty());
+    let plural = target.resource.plural;
+    let within = |verb: &str,
+                  group: &str,
+                  resource: &str,
+                  namespace: Option<&str>,
+                  name: Option<&str>| {
+        let (resource, subresource) = split_resource(resource);
+        rbac.allows(
+            user,
+            &AuthRequest::Resource(request(verb, group, resource, subresource, namespace, name)),
+        )
+    };
+    if matches!(plural, "roles" | "clusterroles") {
+        if within("escalate", RBAC_GROUP, plural, namespace, None) {
+            return Ok(());
+        }
+        for (verb, group, resource, name) in granted(&value["rules"]) {
+            if !within(&verb, &group, &resource, namespace, name.as_deref()) {
+                return Err(escalation_denied(&format!("{verb} on {group}/{resource}")));
+            }
+        }
+        return Ok(());
+    }
+    if !matches!(plural, "rolebindings" | "clusterrolebindings") {
+        return Ok(());
+    }
+    let role_ref = &value["roleRef"];
+    let referenced = match role_ref["kind"].as_str() {
+        Some("ClusterRole") => "clusterroles",
+        Some("Role") => "roles",
+        _ => return Err(Failure::new(403, "Forbidden", "invalid roleRef kind")),
+    };
+    let name = role_ref["name"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| Failure::new(403, "Forbidden", "roleRef name is required"))?;
+    if within("bind", RBAC_GROUP, referenced, namespace, Some(name)) {
+        return Ok(());
+    }
+    let path = match referenced {
+        "roles" => format!("/registry/roles/{}/{name}", namespace.unwrap_or("")),
+        _ => format!("/registry/clusterroles/{name}"),
+    };
+    let role = api
+        .store
+        .get(&key(path)?)
+        .await?
+        .map(object)
+        .transpose()?
+        .ok_or_else(|| Failure::new(403, "Forbidden", "roleRef names a missing role"))?;
+    let scope = if referenced == "roles" {
+        namespace
+    } else {
+        None
+    };
+    for (verb, group, resource, resource_name) in granted(&role["rules"]) {
+        if !within(&verb, &group, &resource, scope, resource_name.as_deref()) {
+            return Err(escalation_denied(&format!("{verb} on {group}/{resource}")));
+        }
+    }
+    Ok(())
 }
