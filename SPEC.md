@@ -792,6 +792,7 @@ second versioning axis.
 | **v0.9.0** (shipped, tag) | **M1 subset** — the first release that runs a cluster: two hosts, restricted non-root Pods, ClusterIP | “v0.1 — kind, but native” plus the single-server parts of “v0.2 — k3s-shaped” that already existed at that tag |
 | **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
 | **v0.10.0** (shipped, tag) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods, bound tokens, ClusterIP and NodePort, local-path PVC | the remainder of “v0.2 — k3s-shaped” that holds without HA |
+| **v0.11.0** (shipped, tag) | Server-Side Apply, opt-in Geode secrets encryption, default-on Traefik and ServiceLB | the three behaviors restored after the contract strike; not the HA milestone |
 | **v1.0.0** (reserved) | **M2** — etcd/Postgres HA, security MUSTs, official conformance | “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
 ### v0.9.0 — M1 subset (shipped)
@@ -828,15 +829,28 @@ system rather than a collection of parts.
   an explicit error until a real backend exists (M2, §16 v1.0.0 scope).
 - Cluster add-ons (CoreDNS) and `--disable=` follow the shape documented
   in [`docs/addons.md`](./docs/addons.md).
-- NodePort, local-path PVC, the packaged add-ons (Traefik and ServiceLB —
-  default-on, skippable with `--disable=traefik,servicelb`; CoreDNS remains
-  not shipped), and bound ServiceAccount tokens ship in this line. The
-  sqlite → etcd upgrade path (`--cluster-init`) stays reserved for
-  v1.0.0.
+- NodePort, local-path PVC, and bound ServiceAccount tokens ship in
+  v0.10.0. CoreDNS remains not shipped. Traefik and ServiceLB ship in
+  v0.11.0. The sqlite → etcd upgrade path (`--cluster-init`) stays
+  reserved for v1.0.0.
 
 **DoD:** one SQLite server plus agents, `kubectl apply` of the documented
 default Pod reaches Running behind a ClusterIP Service, and killing
 in-process control tasks does not kill the API.
+
+### v0.11.0 — apply, sealed secrets, and default add-ons (shipped)
+
+- Server-Side Apply field managers. `kubectl apply --server-side` stores
+  `managedFields`. A second manager on a different field leaves the first
+  manager's fields in place.
+- Secrets encryption at rest is opt-in with `--secrets-encryption`. Payloads
+  are sealed with Geode `seal` / `open`. Facet is the agent path. h3s does
+  not grow a second cipher. With the flag off, Secret data stays readable.
+- Traefik and ServiceLB are default-on. A Service of type LoadBalancer
+  receives an address. An Ingress is served. `--disable=traefik,servicelb`
+  leaves both off.
+- Not HA. Not conformance. Not `v1.0.0`. CoreDNS is not shipped.
+  NodeRestriction is not shipped.
 
 ### v1.0.0 — M2 (reserved; contains the old “v0.3” and “v1.0” scopes)
 
@@ -844,11 +858,9 @@ Not shipped. Nothing below is present tense.
 
 - Durable high availability: 3-server etcd or Postgres, lease leader
   election for controllers.
-- Hardening still reserved here: NodeRestriction; Server-Side Apply field
-  managers shipped on `c3fd6b5be3649ee4cea272d699f4f7174502d990`; secrets
-  encryption at rest shipped on `43548fc5de88374dc2c9a8bb4d8998aae3808dbc`
-  (Geode `seal` / `open`, Facet as the agent path). Bound ServiceAccount
-  tokens shipped in v0.10.0.
+- Hardening still reserved here: NodeRestriction. Server-Side Apply,
+  Geode secrets encryption, and Traefik and ServiceLB shipped in v0.11.0.
+  Bound ServiceAccount tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
 - musl static release binaries, amd64 + arm64; documented backup /

@@ -1440,7 +1440,7 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
         let version = error.to_string();
         for pin in [
-            "h3s 0.10.0",
+            "h3s 0.11.0",
             "Kubernetes 1.34",
             "youki 0.7.0-h3s.1",
             "containerd 2.3.5",
