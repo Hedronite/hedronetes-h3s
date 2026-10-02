@@ -778,9 +778,10 @@ Rootless is a phase-3 goal, not v1.
 - `h3s` logs on stdout via `tracing`. JSON with `--log-format=json`.
 - Admin endpoints on the supervisor: `/readyz`, `/livez`, `/metrics`.
 - metrics-server addon for `kubectl top`.
-- Durability contract for the durability slice (**not shipped yet**; no
+- Durability shipped on `e7e3d467b478a875bb7df818ef67bb38ed1d5c7a`
+  (merged in PR #66 on `e45c1764e49ccf4e5da61dd060f77ee6e74002d6`); no
   `h3s etcd-snapshot` command exists in this tree, and the old etcd
-  snapshot sentence stays not shipped):
+  snapshot sentence stays not shipped:
   - **Token rotation.** `h3s token rotate --data-dir DIR` replaces
     `DIR/server/node-token` with one new value that passes `valid_token`
     (32–256 printable ASCII). It refuses while
@@ -800,8 +801,10 @@ Rootless is a phase-3 goal, not v1.
     the same data dir and the same flags. No 0.9.1 → 0.11 schema jump is
     described.
 - Backup of the shipped stores (present tense):
-  - SQLite (shipped, one server): copy `/var/lib/hedronetes/server/db/h3s.db` after a
-    `PRAGMA wal_checkpoint`.
+  - SQLite (shipped, one server): offline pair —
+    `h3s backup --data-dir DIR --output DEST`, then
+    `h3s restore --data-dir DIR --from DEST` (shipped on
+    `e7e3d467b478a875bb7df818ef67bb38ed1d5c7a`).
   - Postgres (shipped, multi-server): `pg_dump` on the shared registry database.
   - etcd: not implemented, no backup path documented for it in this tag.
 - Version output: `h3s --version` prints h3s version, pinned Kubernetes
