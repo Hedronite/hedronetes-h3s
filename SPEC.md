@@ -846,7 +846,7 @@ second versioning axis.
 | **v0.9.1** (shipped, tag) | structure substrate: split API dispatch, one PodRuntimeProfile, restarting supervisor | — (honesty and structure release between M1 and the k3s-shaped milestone) |
 | **v0.10.0** (shipped, tag) | **k3s-shaped single-server** — one SQLite server, N agents, default Pods, bound tokens, ClusterIP and NodePort, local-path PVC | the remainder of “v0.2 — k3s-shaped” that holds without HA |
 | **v0.11.0** (shipped, tag) | Server-Side Apply, opt-in Geode secrets encryption, default-on Traefik and ServiceLB | the three behaviors restored after the contract strike; not the HA milestone |
-| **postgres line** (on `feat/postgres`, merged `8bae4b55c48e0e46303a1e01310713b551970f2a`) | Multi-server store, **not the HA milestone**: `PostgresStore` on `tokio-postgres` shipped on `174367d34e643b78a3e5a654b02e460de5ada3bf`; `--store=postgres` one-primary, two-server shared, Geode-sealed on `512f220de42ed989f937ad7625a7de732247797b` | the store half of “v0.3 — HA and hardening”; the HA half stays reserved |
+| **v0.11.1** (shipped, tag) | Postgres one-primary store, plus `h3s token rotate`, `h3s backup`, and `h3s restore` | the store half of “v0.3 — HA and hardening”, and the durability commands; the HA half stays reserved |
 | **v1.0.0** (reserved) | **M2** — HA milestone: Raft/leader election, automatic failover, security MUSTs, official conformance (not the Postgres store itself; etcd/MySQL/Xline not implemented) | the rest of “v0.3 — HA and hardening” merged with the old “v1.0” conformance list |
 
 ### v0.9.0 — M1 subset (shipped)
@@ -908,6 +908,24 @@ in-process control tasks does not kill the API.
 - Not HA. Not conformance. Not `v1.0.0`. CoreDNS is not shipped.
   NodeRestriction is not shipped.
 
+### v0.11.1 — postgres store and durability (shipped)
+
+- `--store=postgres` with `--datastore-endpoint` talks to one Postgres primary.
+  Two `h3s server` processes share it. SQLite stays the one-server default.
+  Not leader election, not automatic failover, not a read replica.
+  etcd, MySQL, and Xline are not implemented. `h3s agent` has no datastore.
+- `h3s token rotate` replaces `server/node-token` with one new valid token.
+  It refuses a held registry lock or token lock, prints the secret once on
+  stdout, and does not log it. After the next server start the old token
+  fails and the new token passes. No TTL. No second valid token.
+- `h3s backup` and `h3s restore` copy the registry, its wal and shm when
+  present, `server/tls/`, `server/ca.crt`, and `server/node-token`.
+  Not containerd and not the rest of the runtime. The destination must not
+  already exist. A throwaway restore answers `/readyz` with `ok`.
+- Upgrade, written only: stop, replace the `h3s` binary, start with the
+  same data dir and the same flags.
+- Not HA. Not conformance. Not `v1.0.0`. No `h3s etcd-snapshot` command.
+
 ### v1.0.0 — M2 (reserved; contains the old “v0.3” and “v1.0” scopes)
 
 Not shipped. Nothing below is present tense.
@@ -921,8 +939,8 @@ Not shipped. Nothing below is present tense.
   Bound ServiceAccount tokens shipped in v0.10.0.
 - Full Kubernetes conformance at the k3s bar for the pinned minor;
   official conformance runs, not claims.
-- musl static release binaries, amd64 + arm64; documented backup /
-  restore / upgrade.
+- musl static release binaries, amd64 + arm64. Offline `h3s backup`,
+  `h3s restore`, and the written upgrade sentence shipped in v0.11.1.
 - Soak: 50 nodes, not 5,000.
 - Security baseline in §15 complete.
 - Idle single-node server+agent target: **≤ 250 MB RSS** excluding
