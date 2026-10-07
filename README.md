@@ -180,19 +180,18 @@ Shipped in tag `v0.11.1` on `e7e3d467b478a875bb7df818ef67bb38ed1d5c7a` (graded `
 - **Restore.** `h3s restore --data-dir DIR --from DEST` refuses while the registry lock is held and puts that same set back; a throwaway server on the restored dir then answers `/readyz` with `ok`.
 - **Upgrade, written only.** An upgrade is: stop, replace the `h3s` binary, start with the same data dir and the same flags. No schema-jump drill (e.g. 0.9.1 → 0.11) is described.
 
-## Store maintenance (contract, not shipped)
+## Store maintenance
 
-This is the contract for the gc slice. None of it is shipped. `v0.11.1` on `0ea5b191d8489eb0feba1d06e7faeba8b6a0a323` does not run compaction from the server and does not delete lease rows. The slice does not tag and is not the HA milestone. See [`SPEC.md`](./SPEC.md) §7.4.
+Shipped on `e64c14c4fa9b00035a6f65fcf2ef974ed354464c` (graded `e64c14c`, merged in PR #71 on `ffca6f4782732c960095a443ebf3b60090d16391`; `Storage::maintain` from `b700925`, merged in PR #70). Cargo stays `0.11.1`. No tag. This is not the HA milestone.
 
-- **Startup compact.** After the store opens and before `Api::new`, `h3s server` awaits `store.maintain(1024)`. `maintain` reads the head. When `current - 1024` is above the compacted floor, it calls the existing `compact` with that revision; otherwise the floor stays. It never compacts to the head. A store error from this call fails server start.
+- **Startup compact.** After the store opens and before `Api::new`, `h3s server` awaits `store.maintain(1024)`. `maintain` reads the head. When `current - 1024` is above the compacted floor, it calls the existing `compact` with that revision; otherwise the floor stays. It never compacts to the head. A store error from this call fails server start. A throwaway SQLite server seeded to a head of at least 1026 answers `/readyz` with `ok` and returns HTTP 410 for `resourceVersion=1`.
 - **60 second task.** After that call, a spawned task calls `maintain(1024)` every 60 seconds. An error there is logged and does not stop the API.
-- **Lease-row deletion.** `maintain` deletes `registry_leases` rows whose `expires_ms` is at or before now, on SQLite and on Postgres, and returns the count. It does not delete registry objects. Leases stay unattached to keys.
-- **Watch stays a 50ms poll.** SQLite and Postgres watches read the MVCC log and sleep 50ms when a page is short; Postgres may wake sooner. Those two call sites are why there is no watch cache. This slice does not add one and does not change the 50ms.
+- **Lease-row GC.** `maintain` deletes `registry_leases` rows whose `expires_ms` is at or before now, on SQLite and on Postgres, and returns the count. It does not delete registry objects. Leases stay unattached to keys.
+- **Watch stays a 50ms poll.** SQLite and Postgres watches read the MVCC log and sleep 50ms when a page is short. At `e64c14c`, `crates/h3s-storage/src/sqlite.rs` line 448 is `if !full { tokio::time::sleep(Duration::from_millis(50)).await; }` and `crates/h3s-storage/src/postgres.rs` line 324 is `tokio::time::sleep(Duration::from_millis(50)).await;`. Those two call sites are why there is no watch cache. None ships.
 
 ## In Development
 
 - Full Kubernetes conformance and durable high availability multi-control-plane (see [Status](#status)).
-- Server-run compaction and expired lease-row deletion (see [Store maintenance](#store-maintenance-contract-not-shipped)). No watch cache is planned in that slice.
 - StatefulSet, Job, DaemonSet, and NetworkPolicy in core binary.
 - Ingress via Traefik shipped (see [Shipped](#shipped)); mesh and GitOps in development.
 - Seamless Kubernetes integration.
