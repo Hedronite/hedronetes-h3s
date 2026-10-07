@@ -458,6 +458,7 @@ pub trait Storage: Send + Sync + 'static {
     async fn delete(&self, key: &StoreKey, rv: ResourceVersion) -> Result<()>;
     async fn watch(&self, sel: WatchSelect) -> Result<WatchStream>;
     async fn compact(&self, rev: ResourceVersion) -> Result<()>;
+    async fn maintain(&self, window: ResourceVersion) -> Result<u64>; // §7.4
     async fn lease_grant(&self, ttl: Duration) -> Result<Lease>;
     async fn lease_keepalive(&self, id: LeaseId) -> Result<()>;
 }
@@ -483,7 +484,7 @@ Updates **MUST** be compare-and-swap on that revision.
 The API server **SHOULD** serve watches and most lists from an in-memory watch
 cache. Cache miss / stale RV falls back to the store. No watch cache exists
 in this tree: SQLite and Postgres watches read the MVCC log and sleep 50ms
-when a page is short (Postgres may wake sooner). See §7.4. Streaming encode lists
+when a page is short. See §7.4. Streaming encode lists
 item-by-item. Do not materialize an entire `PodList` before writing the
 response. That is the Go failure mode we refuse to copy.
 
@@ -517,37 +518,43 @@ HA nor an opt-in backend ships for them today.
 HedronDB is not a `--store=` backend. See §2.4. Jev and pgvector are not
 h3s store features either.
 
-### 7.4 Maintenance (gc slice contract; not shipped)
+### 7.4 Maintenance (shipped)
 
-This section is the contract for the gc slice (KP-37). It is not shipped.
-`v0.11.1` on `0ea5b191d8489eb0feba1d06e7faeba8b6a0a323` does not run
-compaction from the server and does not delete lease rows. One
-`h3s server` stays on SQLite. The slice does not tag and is not the HA
-milestone.
+Shipped on `e64c14c4fa9b00035a6f65fcf2ef974ed354464c` (graded `e64c14c`,
+merged in PR #71 on `ffca6f4782732c960095a443ebf3b60090d16391`).
+`Storage::maintain` landed on `b700925` and merged in PR #70. One
+`h3s server` stays on SQLite. Cargo stays `0.11.1`. No tag. This is not
+the HA milestone.
 
 1. **Startup compact.** After the store opens and before `Api::new`,
    `run_server` awaits `store.maintain(1024)`. `maintain` reads the head.
    When `current - 1024` is above the compacted floor, it calls the
    existing `compact` with that revision. Otherwise the floor does not
-   move. Compacting to the head is forbidden. The per-key baseline rule
-   in `compact` stays. A store error from this awaited call fails server
+   move. It never compacts to the head. The per-key baseline rule in
+   `compact` stays. A store error from this awaited call fails server
    start.
 2. **60 second task.** After that awaited call, a spawned task calls
    `maintain(1024)` every 60 seconds. A later error is logged and does not
    stop the API.
-3. **Lease-row deletion.** `maintain` deletes `registry_leases` rows whose
+3. **Lease-row GC.** `maintain` deletes `registry_leases` rows whose
    `expires_ms` is at or before now, on SQLite and on Postgres, and
    returns how many rows it deleted. It does not delete registry objects.
    Leases stay unattached to keys.
 4. **Watch stays a 50ms poll.** SQLite and Postgres watches read the MVCC
-   log and sleep 50ms when the page is short. Postgres may wake sooner.
+   log and sleep 50ms when the page is short. At `e64c14c`:
+   - `crates/h3s-storage/src/sqlite.rs` line 448:
+     `if !full { tokio::time::sleep(Duration::from_millis(50)).await; }`
+   - `crates/h3s-storage/src/postgres.rs` line 324:
+     `tokio::time::sleep(Duration::from_millis(50)).await;`
+
    Those two call sites are the measured reason there is no watch cache.
-   This slice does not add a cache and does not change the 50ms.
-5. **Proof.** A SQLite storage test shows `maintain` moving the floor
-   through `compact` and an expired lease row gone. A throwaway
-   `h3s server` on a seeded SQLite data dir with a head of at least 1026,
-   on a port other than 6443, answers `/readyz` with `ok` and returns
-   HTTP 410 for `resourceVersion=1` after the startup `maintain`.
+   No watch cache ships, and the 50ms is unchanged.
+5. **Proof.** `crates/h3s-storage/tests/contract.rs` shows `maintain`
+   moving the floor through `compact` and an expired lease row gone on
+   SQLite. `crates/h3s/tests/maintenance.rs` seeds a throwaway SQLite data
+   dir to a head of at least 1026, starts `h3s server` on a port other
+   than 6443, sees `/readyz` `ok`, and gets HTTP 410 for
+   `resourceVersion=1` after the startup `maintain`.
 
 ---
 
@@ -841,8 +848,9 @@ Rootless is a phase-3 goal, not v1.
     `e7e3d467b478a875bb7df818ef67bb38ed1d5c7a`).
   - Postgres (shipped, multi-server): `pg_dump` on the shared registry database.
   - etcd: not implemented, no backup path documented for it in this tag.
-- Server-run compaction and expired lease-row deletion are the gc slice
-  contract in §7.4, not shipped.
+- Server-run compaction (`maintain(1024)` at start and every 60 seconds)
+  and expired lease-row GC shipped on
+  `e64c14c4fa9b00035a6f65fcf2ef974ed354464c`; see §7.4.
 - Version output: `h3s --version` prints h3s version, pinned Kubernetes
   minor, youki version, containerd version.
 
@@ -962,13 +970,16 @@ in-process control tasks does not kill the API.
   same data dir and the same flags.
 - Not HA. Not conformance. Not `v1.0.0`. No `h3s etcd-snapshot` command.
 
-### gc slice — server compaction and lease GC (contract; not shipped; no tag)
+### gc slice — server compaction and lease GC (shipped; no tag)
 
-Not shipped. The contract is §7.4: startup `maintain(1024)` awaited before
-`Api::new`, a 60 second `maintain(1024)` task, deletion of expired
-`registry_leases` rows on SQLite and Postgres, and the 50ms MVCC-log poll
-kept as the reason there is no watch cache. Cargo stays `0.11.1`. Not HA.
-No watch cache. No leader election.
+Shipped on `e64c14c4fa9b00035a6f65fcf2ef974ed354464c`, merged in PR #71 on
+`ffca6f4782732c960095a443ebf3b60090d16391`. See §7.4.
+
+- `h3s server` awaits `maintain(1024)` before `Api::new` and runs it again
+  every 60 seconds; a later error is logged and the API stays up.
+- `maintain` deletes expired `registry_leases` rows on SQLite and Postgres.
+- Watch stays a 50ms poll of the MVCC log on both stores.
+- Cargo stays `0.11.1`. No tag. Not HA. No watch cache. No leader election.
 
 ### v1.0.0 — M2 (reserved; contains the old “v0.3” and “v1.0” scopes)
 
