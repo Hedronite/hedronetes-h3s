@@ -399,6 +399,28 @@ impl Storage for PostgresStore {
         }
         Ok(())
     }
+
+    async fn maintain(&self, window: ResourceVersion) -> Result<u64> {
+        let compact_to = {
+            let mut guard = self.client.lock().await;
+            let tx = guard.transaction().await.map_err(db)?;
+            let (current, floor) = head(&tx).await?;
+            tx.rollback().await.map_err(db)?;
+            maintenance_revision(current, floor, window)
+        };
+        if let Some(rev) = compact_to {
+            self.compact(rev).await?;
+        }
+        let now = now_ms()?;
+        let guard = self.client.lock().await;
+        guard
+            .execute(
+                "DELETE FROM registry_leases WHERE expires_ms <= $1",
+                &[&now],
+            )
+            .await
+            .map_err(db)
+    }
 }
 
 impl PostgresStore {

@@ -515,6 +515,25 @@ impl Storage for SqliteStore {
         })
         .await
     }
+
+    async fn maintain(&self, window: ResourceVersion) -> Result<u64> {
+        let compact_to = self
+            .run(move |connection| {
+                let (current, floor) = head(connection)?;
+                Ok(maintenance_revision(current, floor, window))
+            })
+            .await?;
+        if let Some(rev) = compact_to {
+            self.compact(rev).await?;
+        }
+        self.run(|connection| {
+            let now = now_ms()?;
+            let deleted =
+                connection.execute("DELETE FROM registry_leases WHERE expires_ms<=?1", [now])?;
+            Ok(deleted as u64)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

@@ -216,6 +216,20 @@ pub struct Lease {
     pub ttl: Duration,
 }
 
+/// Revision `compact` should apply during maintenance.
+///
+/// `current - window` has to sit strictly above the compacted floor and
+/// strictly behind the head. A window that does not clear the floor leaves
+/// the floor where it is. Compacting to the head is forbidden.
+pub(crate) fn maintenance_revision(
+    current: ResourceVersion,
+    floor: ResourceVersion,
+    window: ResourceVersion,
+) -> Option<ResourceVersion> {
+    let target = current.checked_sub(window)?;
+    (target > floor && target < current).then_some(target)
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
     async fn get(&self, key: &StoreKey) -> Result<Option<StoredObject>>;
@@ -225,6 +239,10 @@ pub trait Storage: Send + Sync + 'static {
     async fn delete(&self, key: &StoreKey, rv: ResourceVersion) -> Result<()>;
     async fn watch(&self, sel: WatchSelect) -> Result<WatchStream>;
     async fn compact(&self, rev: ResourceVersion) -> Result<()>;
+    /// Compact to `current - window` when that revision is above the floor,
+    /// then delete expired `registry_leases` rows. Returns how many lease rows
+    /// were deleted. Registry objects stay.
+    async fn maintain(&self, window: ResourceVersion) -> Result<u64>;
     async fn lease_grant(&self, ttl: Duration) -> Result<Lease>;
     async fn lease_keepalive(&self, id: LeaseId) -> Result<()>;
 }

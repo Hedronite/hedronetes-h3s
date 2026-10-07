@@ -352,3 +352,62 @@ async fn replay_retains_previous_live_values_after_compaction_and_reopen() {
     assert_eq!(added.previous, None);
     assert_eq!(added.object, Some(recreated));
 }
+
+#[tokio::test]
+async fn maintain_moves_the_floor_and_leaves_zero_leases() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = SqliteStore::open(&path).await.unwrap();
+    // Head is still 0, so current - window is not above the floor.
+    assert_eq!(store.maintain(1024).await.unwrap(), 0);
+
+    let mut current = store.create(object("a", "v1")).await.unwrap();
+    for version in 2..=5 {
+        current = store
+            .update(object("a", &format!("v{version}")), current.revision)
+            .await
+            .unwrap();
+    }
+    assert_eq!(current.revision, 5);
+    let mut at = ListSelect::new("/registry/pods/test/");
+    at.at_revision = Some(2);
+    assert!(store.list(at.clone()).await.is_ok());
+
+    let expired = store.lease_grant(Duration::from_millis(1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // current 5 and window 2: compact to 3, behind the head and above floor 0.
+    assert_eq!(store.maintain(2).await.unwrap(), 1);
+
+    at.at_revision = Some(2);
+    assert!(matches!(
+        store.list(at.clone()).await,
+        Err(Error::Compacted {
+            requested: 2,
+            floor: 3
+        })
+    ));
+    at.at_revision = Some(3);
+    assert!(store.list(at.clone()).await.is_ok());
+    at.at_revision = Some(current.revision);
+    assert!(store.list(at).await.is_ok());
+    assert_eq!(store.get(&current.key).await.unwrap().unwrap().value, b"v5");
+
+    let leases: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM registry_leases", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(leases, 0);
+    assert!(matches!(
+        store.lease_keepalive(expired.id).await,
+        Err(Error::LeaseExpired(_))
+    ));
+
+    // The floor is already 3, so current - 2 does not move it, and no lease remains.
+    assert_eq!(store.maintain(2).await.unwrap(), 0);
+    let mut still = ListSelect::new("/registry/pods/test/");
+    still.at_revision = Some(2);
+    assert!(matches!(
+        store.list(still).await,
+        Err(Error::Compacted { floor: 3, .. })
+    ));
+}
