@@ -12,6 +12,9 @@ const LONG_VERSION: &str = concat!(
 );
 const DEFAULT_CONFIG: &str = "/etc/hedronetes/config.yaml";
 const ADMIN_PORT_OFFSET: u16 = 1;
+/// Revisions of MVCC history kept behind the head; see `Storage::maintain`.
+const GC_WINDOW: h3s_storage::ResourceVersion = 1024;
+const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 static SUPERVISOR_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
 /// Hedronetes (h3s) — Kubernetes-compatible cluster distribution in one binary.
@@ -844,6 +847,25 @@ fn parse_addons(disabled: &[String]) -> std::result::Result<(bool, bool), String
     Ok((traefik, servicelb))
 }
 
+/// Run `maintain` every `period`. A failed pass is logged and the next one
+/// still runs; nothing here can stop the API.
+async fn maintain_forever(
+    store: std::sync::Arc<dyn h3s_storage::Storage>,
+    window: h3s_storage::ResourceVersion,
+    period: std::time::Duration,
+) {
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        match store.maintain(window).await {
+            Ok(leases) if leases > 0 => tracing::info!(leases, "h3s store maintenance"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "h3s store maintenance failed"),
+        }
+    }
+}
+
 async fn run_server(args: ServerArgs) -> RunResult {
     let node = local_node(&args)?;
     let cluster_dns = args
@@ -965,6 +987,9 @@ async fn run_server(args: ServerArgs) -> RunResult {
         }
         _ => unreachable!("clap store parser admits only supported backends"),
     };
+    // Bound the MVCC log before the API serves. A store error fails start.
+    store.maintain(GC_WINDOW).await?;
+    tokio::spawn(maintain_forever(store.clone(), GC_WINDOW, GC_INTERVAL));
     let api = h3s_apiserver::Api::new(store)
         .await?
         .with_node_cidrs(&args.cluster_cidr, args.node_cidr_mask_size)
@@ -1409,6 +1434,44 @@ async fn main() {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[tokio::test]
+    async fn maintain_forever_compacts_on_each_period_without_stopping() {
+        use h3s_storage::{ListSelect, Storage, StoreKey, StoredObject};
+        let store = h3s_storage::SqliteStore::open_backend("memory", "")
+            .await
+            .unwrap();
+        let key = StoreKey::new("/registry/configmaps/default/gc").unwrap();
+        let object = StoredObject {
+            key: key.clone(),
+            value: br#"{"metadata":{"name":"gc"}}"#.to_vec(),
+            revision: 0,
+        };
+        let mut head = store.create(object.clone()).await.unwrap().revision;
+        for _ in 0..16 {
+            head = store.update(object.clone(), head).await.unwrap().revision;
+        }
+        let store: std::sync::Arc<dyn Storage> = std::sync::Arc::new(store);
+        let task = tokio::spawn(maintain_forever(
+            store.clone(),
+            4,
+            std::time::Duration::from_millis(20),
+        ));
+        let mut at_one = ListSelect::new("/registry/configmaps/default/");
+        at_one.at_revision = Some(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                store.list(at_one.clone()).await,
+                Err(h3s_storage::Error::Compacted { .. })
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the interval never compacted revision 1");
+        assert!(!task.is_finished(), "maintenance loop must keep running");
+        task.abort();
+    }
 
     #[test]
     fn h3s_help_lists_server_and_agent() {
